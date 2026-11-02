@@ -400,6 +400,63 @@ def test_alert_passes_run_url_and_project_id(tmp_path, capsys):
     assert "proj-xyz" in body
 
 
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("https://lf.example.com/", "https://lf.example.com/project/proj-xyz/traces/"),
+        ("", "https://cloud.langfuse.com/project/proj-xyz/traces/"),
+    ],
+)
+def test_alert_trace_links_use_langfuse_host(tmp_path, capsys, host, expected):
+    data = tmp_path / "data"
+    write_runs(data, regression_runs())
+    langfuse = httpx.MockTransport(
+        lambda request: httpx.Response(200, json={"data": [{"id": "proj-xyz"}]})
+    )
+    github = GitHub()
+    env = {
+        **GH_ENV,
+        "LANGFUSE_PUBLIC_KEY": LF_PUBLIC,
+        "LANGFUSE_SECRET_KEY": LF_SECRET,
+        "LANGFUSE_HOST": host,
+    }
+    code, _, _ = run_cli(
+        capsys, ["alert", "--data", str(data)], env, **hooks(github=github, langfuse=langfuse)
+    )
+    assert code == 0
+    assert expected in github.creates_made()[0][2]["body"]
+
+
+def test_probe_golden_does_not_depend_on_the_working_directory(tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    data = tmp_path / "data"
+    env = {"DEMO_URL": "https://demo.invalid"}
+    code, _, _ = run_cli(
+        capsys, ["probe", "--kind", "manual", "--data", str(data)], env, **hooks(Demo())
+    )
+    assert code == 0
+    assert len(read_jsonl(data / PROBE_RUNS)) == 1
+
+
+def test_probe_golden_option_overrides_the_default(tmp_path, capsys):
+    golden = tmp_path / "other.jsonl"
+    lines = GOLDEN.read_text(encoding="utf-8").splitlines()
+    golden.write_text("\n".join(lines[:1]) + "\n", encoding="utf-8")
+    data = tmp_path / "data"
+    env = {"DEMO_URL": "https://demo.invalid"}
+    code, _, _ = run_cli(
+        capsys,
+        ["probe", "--kind", "manual", "--golden", str(golden), "--data", str(data)],
+        env,
+        **hooks(Demo()),
+    )
+    assert code == 0
+    assert (
+        read_jsonl(data / PROBE_RUNS)[0]["n_scored"] + read_jsonl(data / PROBE_RUNS)[0]["n_errors"]
+        <= 1
+    )
+
+
 def test_alert_survives_project_id_failure(tmp_path, capsys):
     data = tmp_path / "data"
     write_runs(data, regression_runs())

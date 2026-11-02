@@ -20,7 +20,7 @@ from goldpass.metrics import score_item
 
 from rail_rag_monitor.stats import percentile
 
-PROBE_GOLDEN = Path("probe/golden.jsonl")
+PROBE_GOLDEN = Path(__file__).resolve().parents[2] / "probe" / "golden.jsonl"
 
 PACE_S = 13.0  # between /ask calls (the demo rate-limits)
 TIMEOUT_S = 120.0

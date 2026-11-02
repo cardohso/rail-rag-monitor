@@ -171,7 +171,11 @@ def test_closes_after_3_clean_runs():
         ("POST", f"/repos/{REPO}/issues/7/comments"),
         ("PATCH", f"/repos/{REPO}/issues/7"),
     ]
-    assert "recovered" in fake.json_body(1)["body"]
+    comment = fake.json_body(1)["body"]
+    assert "has not fired for 3 evaluations in a row" in comment
+    assert "rolling baseline" in comment
+    assert "check the dashboard" in comment
+    assert "recovered" not in comment
     assert fake.json_body(2) == {"state": "closed"}
     assert state["rules"]["quality"] == {"issue": None, "clean_runs": 0}
 
@@ -656,3 +660,35 @@ def test_failed_fire_resets_the_clean_run_count_first():
     failing["on"] = False
     after = sync([], saved, gh, run_url=RUN_URL, project_id="p", dry_run=False)
     assert after["rules"]["quality"] == {"issue": 7, "clean_runs": 1}
+
+
+def test_trace_url_host_default_custom_and_validated():
+    assert (
+        trace_url("p", "t", "https://lf.example.com") == "https://lf.example.com/project/p/traces/t"
+    )
+    assert (
+        trace_url("p", "t", "https://lf.example.com/")
+        == "https://lf.example.com/project/p/traces/t"
+    )
+    assert trace_url("p", "t", None) == "https://cloud.langfuse.com/project/p/traces/t"
+    assert trace_url("p", "t", "") == "https://cloud.langfuse.com/project/p/traces/t"
+    with pytest.raises(ValueError):
+        trace_url("p", "t", "http://lf.example.com")
+
+
+def test_body_and_sync_use_the_configured_langfuse_host():
+    body = render_body(quality_alert(), RUN_URL, "proj1", "https://lf.example.com")
+    assert "https://lf.example.com/project/proj1/traces/tr-aaa" in body
+    assert "cloud.langfuse.com" not in body
+
+    fake = FakeGitHub()
+    sync(
+        [quality_alert()],
+        {"rules": {}},
+        fake.gh(),
+        run_url=RUN_URL,
+        project_id="proj1",
+        dry_run=False,
+        langfuse_host="https://lf.example.com",
+    )
+    assert "https://lf.example.com/project/proj1/traces/tr-aaa" in fake.json_body(0)["body"]

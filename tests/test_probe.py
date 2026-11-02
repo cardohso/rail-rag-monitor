@@ -135,7 +135,8 @@ def probe(demo, sleeps=None, kind="manual", **kwargs):
 
 
 def test_golden_has_8_items():
-    assert PROBE_GOLDEN == Path("probe/golden.jsonl")
+    assert PROBE_GOLDEN == Path(__file__).resolve().parent.parent / "probe" / "golden.jsonl"
+    assert PROBE_GOLDEN.is_file()
     assert list(ITEMS) == IDS
     kinds = [item["expected"] for item in ITEMS.values()]
     assert kinds.count("answer") == 6

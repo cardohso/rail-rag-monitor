@@ -2,7 +2,7 @@
 
 One open issue per rule. A new firing comments on it; if the owner closed it by hand the next
 firing opens a new one; after `CLEAN_RUNS_TO_CLOSE` consecutive clean runs the monitor comments
-"recovered" and closes it.
+posts a closing comment and closes it.
 
 State shape: `{"rules": {rule: {"issue": int | None, "clean_runs": int}}, "dry_run_issues":
 {rule: int}}`. Real runs only touch `rules`; dry runs only touch `dry_run_issues`, so a planted
@@ -63,8 +63,16 @@ class SyncError(RuntimeError):
         self.state = state
 
 
-def trace_url(project_id: str, trace_id: str) -> str:
-    return f"{LANGFUSE_URL}/project/{project_id}/traces/{trace_id}"
+def langfuse_base_url(host: str | None = None) -> str:
+    """The Langfuse base URL: `host` (https only, no trailing slash) or the cloud default."""
+    base = (host or "").strip().rstrip("/") or LANGFUSE_URL
+    if not base.startswith("https://"):
+        raise ValueError("the Langfuse host must start with https://")
+    return base
+
+
+def trace_url(project_id: str, trace_id: str, host: str | None = None) -> str:
+    return f"{langfuse_base_url(host)}/project/{project_id}/traces/{trace_id}"
 
 
 class GitHubIssues:
@@ -173,14 +181,14 @@ def _id_list(values: object) -> str:
     return (", ".join(shown) or _MISSING) + more
 
 
-def _trace(trace_id: object, project_id: str | None) -> str:
+def _trace(trace_id: object, project_id: str | None, host: str | None = None) -> str:
     tid = _ident(trace_id)
     if tid is None:
         return _MISSING
     pid = _ident(project_id)
     if tid == _PLACEHOLDER or pid is None or pid == _PLACEHOLDER:
         return f"`{tid}`" if tid != _PLACEHOLDER else tid
-    return f"[{tid}]({trace_url(pid, tid)})"
+    return f"[{tid}]({trace_url(pid, tid, host)})"
 
 
 def _table(headers: list[str], rows: list[list[str]]) -> list[str]:
@@ -196,7 +204,9 @@ def _rows(items: object) -> tuple[list[dict], int]:
     return dicts[:MAX_LIST_ROWS], max(0, len(dicts) - MAX_LIST_ROWS)
 
 
-def _trace_table(items: object, project_id: str | None, with_status: bool) -> list[str]:
+def _trace_table(
+    items: object, project_id: str | None, with_status: bool, host: str | None = None
+) -> list[str]:
     rows, extra = _rows(items)
     if not rows:
         return []
@@ -206,7 +216,7 @@ def _trace_table(items: object, project_id: str | None, with_status: bool) -> li
         row = [_ident(item.get("run_id")) or _MISSING, _ident(item.get("question_id")) or _MISSING]
         if with_status:
             row.append(_ident(item.get("status")) or _MISSING)
-        row.append(_trace(item.get("trace_id"), project_id))
+        row.append(_trace(item.get("trace_id"), project_id, host))
         table.append(row)
     lines = _table(headers, table)
     if extra:
@@ -218,7 +228,9 @@ def _run_link(run_url: str) -> str | None:
     return f"[workflow run]({run_url})" if _RUN_URL_RE.fullmatch(run_url or "") else None
 
 
-def render_body(alert: Alert, run_url: str, project_id: str | None) -> str:
+def render_body(
+    alert: Alert, run_url: str, project_id: str | None, langfuse_host: str | None = None
+) -> str:
     """Markdown for an issue or comment. Only whitelisted `details` fields are rendered."""
     d = alert.details if isinstance(alert.details, dict) else {}
     lines: list[str] = []
@@ -229,7 +241,7 @@ def render_body(alert: Alert, run_url: str, project_id: str | None) -> str:
     if alert.rule == "uptime":
         lines += ["**Uptime**: probe questions ended in an error in consecutive runs.", ""]
         lines += _table(["Metric", "Value"], [["Runs", _id_list(d.get("run_ids"))]])
-        errors = _trace_table(d.get("errors"), project_id, with_status=True)
+        errors = _trace_table(d.get("errors"), project_id, with_status=True, host=langfuse_host)
         if errors:
             lines += ["", "Failed questions:", ""] + errors
     elif alert.rule == "quality":
@@ -251,7 +263,7 @@ def render_body(alert: Alert, run_url: str, project_id: str | None) -> str:
                 ["Baseline runs", _id_list(d.get("baseline_run_ids"))],
             ],
         )
-        failed = _trace_table(d.get("failed"), project_id, with_status=False)
+        failed = _trace_table(d.get("failed"), project_id, with_status=False, host=langfuse_host)
         if failed:
             lines += ["", "Failed questions:", ""] + failed
     elif alert.rule == "latency":
@@ -297,9 +309,10 @@ def _fire(
     run_url: str,
     project_id: str | None,
     dry_run: bool,
+    langfuse_host: str | None = None,
 ) -> int:
     """Comment on the open issue, or open a new one. Returns the issue number now in use."""
-    body = render_body(alert, run_url, project_id)
+    body = render_body(alert, run_url, project_id, langfuse_host)
     if issue is not None and gh.is_open(issue):
         gh.comment(issue, "Alert fired again.\n\n" + body)
         return issue
@@ -315,6 +328,7 @@ def _sync_rule(
     run_url: str,
     project_id: str | None,
     dry_run: bool,
+    langfuse_host: str | None = None,
 ) -> None:
     """Apply one rule to `new` in place.
 
@@ -327,7 +341,13 @@ def _sync_rule(
         if alert is not None:
             dry = new.setdefault("dry_run_issues", {})
             dry[rule] = _fire(
-                alert, dry.get(rule), gh, run_url=run_url, project_id=project_id, dry_run=True
+                alert,
+                dry.get(rule),
+                gh,
+                run_url=run_url,
+                project_id=project_id,
+                dry_run=True,
+                langfuse_host=langfuse_host,
             )
         return
 
@@ -335,7 +355,13 @@ def _sync_rule(
     if alert is not None:
         entry["clean_runs"] = 0
         entry["issue"] = _fire(
-            alert, entry.get("issue"), gh, run_url=run_url, project_id=project_id, dry_run=False
+            alert,
+            entry.get("issue"),
+            gh,
+            run_url=run_url,
+            project_id=project_id,
+            dry_run=False,
+            langfuse_host=langfuse_host,
         )
         return
     issue = entry.get("issue")
@@ -347,7 +373,9 @@ def _sync_rule(
         if gh.is_open(issue):
             gh.comment(
                 issue,
-                f"Alert recovered after {CLEAN_RUNS_TO_CLOSE} clean runs. Closing this issue.",
+                f"This rule has not fired for {CLEAN_RUNS_TO_CLOSE} evaluations in a row. That "
+                "means either the problem is gone or the rolling baseline has absorbed the "
+                "change, so check the dashboard before assuming it is fixed. Closing this issue.",
             )
             gh.close(issue)
         entry["issue"] = None
@@ -363,6 +391,7 @@ def sync(
     run_url: str,
     project_id: str | None,
     dry_run: bool,
+    langfuse_host: str | None = None,
 ) -> dict:
     """Apply this run's alerts to GitHub and return the new state (the input is not modified).
 
@@ -390,6 +419,7 @@ def sync(
                 run_url=run_url,
                 project_id=project_id,
                 dry_run=dry_run,
+                langfuse_host=langfuse_host,
             )
         except GitHubError as exc:
             failures.append((rule, exc))

@@ -21,7 +21,7 @@ import httpx
 from rail_rag_monitor.alerts import DELTA_FLOOR, evaluate, noise_report, planted_runs
 from rail_rag_monitor.collector import collect_day
 from rail_rag_monitor.dashboard import build_site
-from rail_rag_monitor.github_issues import GitHubIssues, SyncError, sync
+from rail_rag_monitor.github_issues import GitHubIssues, SyncError, langfuse_base_url, sync
 from rail_rag_monitor.langfuse_api import LangfuseAPI, LangfuseError
 from rail_rag_monitor.probe import PACE_S, PROBE_GOLDEN, run_probe
 from rail_rag_monitor.store import (
@@ -102,7 +102,7 @@ def _cmd_probe(args: argparse.Namespace, deps: _Deps) -> int:
         with httpx.Client(transport=deps.transports.get("demo"), timeout=120.0) as client:
             run = run_probe(
                 base_url,
-                PROBE_GOLDEN,
+                Path(args.golden) if args.golden else PROBE_GOLDEN,
                 run_id=run_id,
                 kind=args.kind,
                 commit=commit,
@@ -186,6 +186,10 @@ def _cmd_alert(args: argparse.Namespace, deps: _Deps) -> int:
         return 0
     state = read_json(data / ALERT_STATE, {})
     try:
+        host = langfuse_base_url(deps.env.get("LANGFUSE_HOST"))
+    except ValueError as exc:
+        raise CliError(f"LANGFUSE_HOST: {exc}") from None
+    try:
         new_state = sync(
             alerts,
             state,
@@ -193,6 +197,7 @@ def _cmd_alert(args: argparse.Namespace, deps: _Deps) -> int:
             run_url=_run_url(deps.env),
             project_id=_project_id(deps) if alerts else None,
             dry_run=args.plant_regression,
+            langfuse_host=host,
         )
     except SyncError as exc:
         write_json(data / ALERT_STATE, exc.state)  # keep the issue numbers: no duplicates on retry
@@ -255,6 +260,7 @@ def _parser() -> argparse.ArgumentParser:
 
     probe = command("probe", _cmd_probe, "ask the demo the golden questions")
     probe.add_argument("--kind", required=True, choices=["scheduled", "manual", "noise"])
+    probe.add_argument("--golden", help="golden questions file (default: probe/golden.jsonl)")
     probe.add_argument("--repeat", type=int, default=1, help=f"noise runs only, 1 to {MAX_REPEAT}")
 
     collect = command("collect", _cmd_collect, "summarise one UTC day of production traffic")
