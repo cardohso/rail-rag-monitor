@@ -28,16 +28,38 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
-def read_jsonl(path: Path) -> list[dict]:
+def _read_lines(path: Path) -> list[tuple[int, Any]]:
+    """Parsed (1-based line number, value) pairs; a bad line raises without echoing its text."""
     if not path.exists():
         return []
+    parsed = []
     with path.open(encoding="utf-8") as f:
-        return [json.loads(line) for line in f if line.strip()]
+        for number, line in enumerate(f, start=1):
+            if not line.strip():
+                continue
+            try:
+                parsed.append((number, json.loads(line)))
+            except ValueError:
+                raise ValueError(f"{path}: line {number} is not valid JSON") from None
+    return parsed
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    return [row for _, row in _read_lines(path)]
 
 
 def upsert_jsonl(path: Path, rows: Iterable[dict], key: str) -> None:
-    """Insert rows, replacing existing rows with the same `key` value in place."""
-    existing = read_jsonl(path)
+    """Insert rows, replacing existing rows with the same `key` value in place.
+
+    The batch is applied in order, so a repeated key within `rows` keeps the position of its first
+    occurrence and the value of its last. A stored row that is not an object or lacks `key`
+    raises ValueError naming the file and line (never the row's contents).
+    """
+    existing = []
+    for number, row in _read_lines(path):
+        if not isinstance(row, dict) or key not in row:
+            raise ValueError(f"{path}: line {number} is not a JSON object with a {key!r} field")
+        existing.append(row)
     index = {row[key]: i for i, row in enumerate(existing)}
     for row in rows:
         if row[key] in index:
