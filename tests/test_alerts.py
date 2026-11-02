@@ -189,7 +189,7 @@ def test_latency_exactly_2x_is_silent_and_none_is_skipped():
 
 
 def test_planted_runs_shape():
-    last = make_run(5, errors=("q14",))
+    last = make_run(5)
     planted = planted_runs(last)
     assert len(planted) == 3
     assert all(p["kind"] == "dry-run" for p in planted)
@@ -202,6 +202,34 @@ def test_planted_runs_shape():
             assert p["results"][qid]["pass"] is False
         assert p["results"]["q14"] == last["results"]["q14"]
     assert len(planted_runs(last, n=2)) == 2
+
+
+def test_planted_runs_are_clean_apart_from_the_plant():
+    last = make_run(5, errors=("q01", "q14"), warm=9.0)
+    for p in planted_runs(last):
+        assert all(r["status"] == "ok" for r in p["results"].values())
+        assert p["n_errors"] == 0
+        assert p["warm_p95_s"] is None
+        for qid in BAD:
+            r = p["results"][qid]
+            assert (r["status"], r["refused"], r["grounding"], r["pass"]) == (
+                "ok",
+                True,
+                False,
+                False,
+            )
+        assert p["results"]["q14"]["pass"] is True
+        assert p["n_pass"] == 4
+        assert p["n_scored"] == 8
+
+
+def test_dry_run_after_errored_or_slow_real_run_yields_only_quality():
+    base = [make_run(i) for i in range(12)]
+    last = make_run(12, errors=("q14", "q01"), warm=9.0)
+    alerts = evaluate(base + [last] + planted_runs(last), DELTA)
+    assert kinds(alerts) == ["quality"]
+    assert {f["question_id"] for f in alerts[0].details["failed"]} == set(BAD)
+    assert alerts[0].details["fail_recent"] == 12  # the errored q01 is a planted fail, not an error
 
 
 def test_simulate_delta_floor():

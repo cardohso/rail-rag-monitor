@@ -168,17 +168,38 @@ def evaluate(runs: list[dict], delta: float) -> list[Alert]:
 
 
 def planted_runs(last_run: dict, n: int = 3) -> list[dict]:
-    """In-memory regression: copies of `last_run` where q01, q06, q09 and q10 refuse and fail."""
+    """In-memory regression: `n` dry-run copies of `last_run` with q01, q06, q09, q10 failing.
+
+    Each planted run is self-consistent and can only trip the quality rule, never uptime or
+    latency, whatever state `last_run` was in:
+    - the four planted questions become a clean refusal (status ok, refused, ungrounded, fail);
+    - any other question whose status is not "ok" is replaced by a pass with status "ok"
+      (its refusal/grounding are unknown, so they are None), so no error is carried over;
+    - warm p50/p95 are None, so the latency rule skips the run;
+    - n_pass, n_scored and n_errors are recomputed.
+    """
     planted = []
     for i in range(1, n + 1):
         run = copy.deepcopy(last_run)
         run["run_id"] = f"{last_run['run_id']}-planted-{i}"
         run["kind"] = DRY_RUN
-        for qid in PLANTED_QUESTIONS:
-            res = _results(run).get(qid)
-            if res is not None:
-                res["refused"] = True
-                res["pass"] = False
+        results = _results(run)
+        for qid, res in results.items():
+            if qid in PLANTED_QUESTIONS:
+                res.update(status="ok", refused=True, grounding=False, **{"pass": False})
+            elif res.get("status") != "ok":
+                res.update(
+                    status="ok",
+                    refused=None,
+                    grounding=None,
+                    latency_s=None,
+                    **{"pass": True},
+                )
+        run["n_pass"] = sum(r.get("pass") is True for r in results.values())
+        run["n_scored"] = sum(r.get("pass") is not None for r in results.values())
+        run["n_errors"] = 0
+        run["warm_p50_s"] = None
+        run["warm_p95_s"] = None
         planted.append(run)
     return planted
 
