@@ -54,14 +54,9 @@ class _Deps:
     transports: Mapping[str, httpx.BaseTransport] = field(default_factory=dict)
 
     def langfuse(self) -> LangfuseAPI | None:
-        if LangfuseAPI.from_env(self.env) is None:  # keys missing
-            return None
-        return LangfuseAPI(
-            self.env["LANGFUSE_PUBLIC_KEY"],
-            self.env["LANGFUSE_SECRET_KEY"],
-            self.env.get("LANGFUSE_HOST") or "https://cloud.langfuse.com",
-            transport=self.transports.get("langfuse"),
-            sleep=self.sleep,
+        """The Langfuse client, or None if the keys are missing. The caller closes it."""
+        return LangfuseAPI.from_env(
+            self.env, transport=self.transports.get("langfuse"), sleep=self.sleep
         )
 
     def github(self) -> GitHubIssues | None:
@@ -85,7 +80,9 @@ def _sorted_runs(data: Path) -> list[dict]:
 def _run_ids(deps: _Deps, count: int) -> list[str]:
     run_id, attempt = deps.env.get("GITHUB_RUN_ID"), deps.env.get("GITHUB_RUN_ATTEMPT") or "1"
     base = (
-        f"{run_id}-{attempt}" if run_id else deps.now().astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+        f"{run_id}-{attempt}"
+        if run_id
+        else deps.now().astimezone(UTC).strftime("%Y%m%dT%H%M%S%fZ")  # microseconds: unique
     )
     ids = [f"{base}-{i}" for i in range(1, count + 1)]
     if not all(RUN_ID_RE.fullmatch(i) for i in ids):
@@ -134,7 +131,8 @@ def _cmd_collect(args: argparse.Namespace, deps: _Deps) -> int:
         for res in (run.get("results") or {}).values()
         if res.get("trace_id")
     }
-    traffic = collect_day(api, day, probe_traces)
+    with api:
+        traffic = collect_day(api, day, probe_traces)
     upsert_jsonl(data / TRAFFIC_DAILY, [traffic.to_dict()], "day")
     print(f"collected {traffic.day}: {traffic.n_requests} requests, {traffic.n_errors} errors")
     return 0
@@ -162,7 +160,10 @@ def _run_url(env: Mapping[str, str]) -> str:
 def _project_id(deps: _Deps) -> str | None:
     try:
         api = deps.langfuse()
-        return api.project_id() if api else None
+        if api is None:
+            return None
+        with api:
+            return api.project_id()
     except Exception:  # links are optional: alerting must go on
         return None
 

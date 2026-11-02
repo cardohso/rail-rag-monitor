@@ -8,8 +8,11 @@ import httpx
 import pytest
 
 from rail_rag_monitor.probe import (
+    BACKOFF_503_S,
     DEADLINE_S,
     PROBE_GOLDEN,
+    RETRIES_503,
+    TIMEOUT_S,
     ProbeRun,
     QuestionResult,
     question_pass,
@@ -589,11 +592,19 @@ def test_deadline_does_not_sleep_for_skipped_questions():
     assert sleeps == [13.0]  # one pace before q06, after which the deadline had passed
 
 
-def test_deadline_default_is_18_minutes_and_keyword_only():
-    assert DEADLINE_S == 1080
+def test_deadline_default_is_15_minutes_and_keyword_only():
+    assert DEADLINE_S == 900
     param = inspect.signature(run_probe).parameters["deadline_s"]
     assert param.kind is inspect.Parameter.KEYWORD_ONLY
     assert param.default == DEADLINE_S
+
+
+def test_deadline_plus_worst_single_question_fits_the_step_limit():
+    # The deadline is only checked before a question, so the last one can start at DEADLINE_S and
+    # still run its full retry policy: 4 attempts of TIMEOUT_S plus RETRIES_503 backoffs (~525 s).
+    worst_question_s = (RETRIES_503 + 1) * TIMEOUT_S + RETRIES_503 * BACKOFF_503_S
+    step_limit_s = 25 * 60  # timeout-minutes of the workflow's probe step
+    assert DEADLINE_S + worst_question_s < step_limit_s
 
 
 def test_deadline_is_measured_from_the_start_of_the_run():

@@ -26,7 +26,10 @@ PACE_S = 13.0  # between /ask calls (the demo rate-limits)
 TIMEOUT_S = 120.0
 RETRIES_503 = 3
 BACKOFF_503_S = 15.0
-DEADLINE_S = 1080  # 18 min: keeps a hung demo under the workflow step limit (25 min)
+# 15 min. Checked only before each question, so the run can overrun it by one question: at worst
+# 4 attempts x TIMEOUT_S + 3 x BACKOFF_503_S (~525 s). 900 s + 525 s stays under the workflow's
+# 25 min (1500 s) probe step limit.
+DEADLINE_S = 900
 
 
 # Everything stored in a ProbeRun that came from outside this process must match one of these;

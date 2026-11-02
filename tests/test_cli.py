@@ -274,7 +274,7 @@ def test_probe_repeat_waits_between_runs(tmp_path, capsys):
     assert len(set(ids)) == 3
     assert all(ID_RE.fullmatch(i) for i in ids)
     assert {r["kind"] for r in runs} == {"noise"}
-    assert ids[0].startswith("20261102T061730Z-")
+    assert ids[0].startswith("20261102T061730000000Z-")
 
 
 def test_probe_ci_run_ids_follow_run_and_attempt(tmp_path, capsys):
@@ -508,3 +508,104 @@ def test_build_site_with_empty_data_dir(tmp_path, capsys):
 def test_unknown_command_is_an_error(capsys):
     code, _, _ = run_cli(capsys, ["nope"], {}, **hooks())
     assert code != 0
+
+
+# --- hardening (H-B) --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "1.5", ""])
+@pytest.mark.parametrize("kind", ["noise", "manual"])
+def test_probe_rejects_bad_repeat_without_any_request(tmp_path, capsys, value, kind):
+    events = []
+    code, _, err = run_cli(
+        capsys,
+        ["probe", "--kind", kind, "--repeat", value, "--data", str(tmp_path / "d")],
+        {"DEMO_URL": "https://demo.invalid"},
+        **hooks(Demo(events)),
+    )
+    assert code != 0
+    assert "--repeat" in err
+    assert events == []
+    assert not (tmp_path / "d").exists()
+
+
+def test_probe_repeat_message_names_the_limit(tmp_path, capsys):
+    code, _, err = run_cli(
+        capsys,
+        ["probe", "--kind", "noise", "--repeat", "0", "--data", str(tmp_path)],
+        {"DEMO_URL": "https://demo.invalid"},
+        **hooks(Demo()),
+    )
+    assert code == 2
+    assert f"1 to {cli.MAX_REPEAT}" in err
+
+
+def test_local_run_ids_are_unique_across_sub_second_invocations(tmp_path, capsys):
+    data = tmp_path / "data"
+    ids = []
+    for microsecond in (0, 1, 999_999):
+        moment = NOW.replace(microsecond=microsecond)
+        h = hooks(Demo())
+        h["_now"] = lambda moment=moment: moment
+        code, _, _ = run_cli(
+            capsys,
+            ["probe", "--kind", "manual", "--data", str(data)],
+            {"DEMO_URL": "https://demo.invalid"},
+            **h,
+        )
+        assert code == 0
+    ids = [r["run_id"] for r in read_jsonl(data / PROBE_RUNS)]
+    assert len(set(ids)) == 3
+    assert all(ID_RE.fullmatch(i) for i in ids)
+    assert "20261102T061730000001Z-1" in ids
+
+
+def test_local_noise_run_ids_stay_distinct_and_valid(tmp_path, capsys):
+    code, _, _ = run_cli(
+        capsys,
+        ["probe", "--kind", "noise", "--repeat", "3", "--data", str(tmp_path)],
+        {"DEMO_URL": "https://demo.invalid"},
+        **hooks(Demo()),
+    )
+    assert code == 0
+    ids = [r["run_id"] for r in read_jsonl(tmp_path / PROBE_RUNS)]
+    assert ids == [f"20261102T061730000000Z-{i}" for i in (1, 2, 3)]
+    assert all(ID_RE.fullmatch(i) for i in ids)
+
+
+class _CountingClient(httpx.Client):
+    created = 0
+
+    def __init__(self, *args, **kwargs):
+        type(self).created += 1
+        super().__init__(*args, **kwargs)
+
+
+def test_langfuse_client_is_built_only_when_keys_are_present(monkeypatch):
+    monkeypatch.setattr(httpx, "Client", _CountingClient)
+    _CountingClient.created = 0
+    keyless = cli._Deps({})
+    assert keyless.langfuse() is None
+    assert _CountingClient.created == 0
+
+    deps = cli._Deps(
+        {"LANGFUSE_PUBLIC_KEY": LF_PUBLIC, "LANGFUSE_SECRET_KEY": LF_SECRET},
+        transports={"langfuse": httpx.MockTransport(lambda r: httpx.Response(200, json={}))},
+    )
+    api = deps.langfuse()
+    assert api is not None
+    assert _CountingClient.created == 1  # no throwaway client for the keys-present check
+    api.close()
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"LANGFUSE_PUBLIC_KEY": "  ", "LANGFUSE_SECRET_KEY": LF_SECRET},
+        {"LANGFUSE_PUBLIC_KEY": LF_PUBLIC, "LANGFUSE_SECRET_KEY": "\n"},
+    ],
+)
+def test_collect_treats_blank_keys_as_missing(tmp_path, capsys, env):
+    code, out, _ = run_cli(capsys, ["collect", "--data", str(tmp_path / "d")], env, **hooks())
+    assert code == 0
+    assert "skipping collection" in out
