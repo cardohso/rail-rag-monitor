@@ -287,3 +287,14 @@ def test_template_is_packaged():
     import importlib.resources as r
 
     assert r.files("rail_rag_monitor").joinpath("templates/index.html").is_file()
+
+
+def test_template_keeps_charts_full_width_on_phones():
+    template = Path("src/rail_rag_monitor/templates/index.html").read_text(encoding="utf-8")
+    # no text label in a reserved right margin: the plot keeps the full card width
+    assert "width + 8" not in template
+    # end-of-line labels are only drawn when the card is wide enough
+    assert "isNarrow(" in template
+    # y-axis titles short enough for a 190px plot, and bounded size legends
+    assert "(% of refusals)" not in template
+    assert "values: legendValues(rows)" in template

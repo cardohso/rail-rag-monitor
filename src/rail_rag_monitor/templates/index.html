@@ -489,7 +489,10 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
       axis: { labelAngle: 0, labelOverlap: "greedy", labelSeparation: 6, labelExpr: JSON.stringify(list.map(function (r) { return dayLabel(r.started_at); })) + "[datum.value]" }
     };
   }
-  var RUN_AXIS_TITLE = "Run date (UTC, MM-DD), oldest to newest";
+  var RUN_AXIS_TITLE = "Run date (UTC, MM-DD)";
+  // End-of-line labels need a right margin: only draw them when the card is wide enough.
+  var NARROW_PX = 520;
+  function isNarrow(id) { return ($(id).clientWidth || 0) < NARROW_PX; }
 
   function passChart(c) {
     var base = passBaseline();
@@ -508,11 +511,6 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
         mark: { type: "rule", color: c.ink2, strokeWidth: 1 },
         encoding: { y: { field: "mean", type: "quantitative" } }
       });
-      layers.push({
-        data: { values: [{ mean: base.mean, label: "baseline " + Math.round(base.mean) + "%" }] },
-        mark: { type: "text", align: "left", baseline: "middle", color: c.ink2, fontSize: 11 },
-        encoding: { x: { value: { expr: "width + 8" } }, y: { field: "mean", type: "quantitative" }, text: { field: "label" } }
-      });
     }
     layers.push({
       data: { values: rows },
@@ -527,7 +525,7 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
         ]
       }
     });
-    return { height: 230, padding: { left: 4, top: 8, bottom: 4, right: base.established ? 84 : 12 }, layer: layers };
+    return { height: 230, padding: { left: 4, top: 8, bottom: 4, right: 12 }, layer: layers };
   }
 
   function gridChart(c) {
@@ -621,10 +619,11 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
       });
     }
     var x = runAxis(runs, RUN_AXIS_TITLE);
-    layers.push(dotLine(rows, { domain: ["p50", "p95"], range: [c.s[0], c.s[1]] }, x, "Warm latency (seconds)",
+    layers.push(dotLine(rows, { domain: ["p50", "p95"], range: [c.s[0], c.s[1]] }, x, "Warm latency (s)",
       [{ field: "when", title: "Run" }, { field: "series", title: "Percentile" }, { field: "value", title: "Seconds", format: ".2f" }]));
-    layers.push(lineEndLabel(ends, c));
-    return { height: 230, padding: { left: 4, top: 8, bottom: 4, right: 36 }, layer: layers };
+    var labelled = !isNarrow("chart-warm");
+    if (labelled) layers.push(lineEndLabel(ends, c));
+    return { height: 230, padding: { left: 4, top: 8, bottom: 4, right: labelled ? 36 : 12 }, layer: layers };
   }
 
   function coldChart(c) {
@@ -639,7 +638,7 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
       mark: { type: "line", color: c.s[2], point: { filled: true, size: 64, color: c.s[2], stroke: c.surface, strokeWidth: 2 } },
       encoding: {
         x: runAxis(runs, RUN_AXIS_TITLE),
-        y: { field: "value", type: "quantitative", scale: { zero: true }, axis: { title: "Cold-start latency (seconds)" } },
+        y: { field: "value", type: "quantitative", scale: { zero: true }, axis: { title: "Cold start (s)" } },
         tooltip: [{ field: "when", title: "Run" }, { field: "value", title: "Seconds", format: ".1f" }]
       }
     };
@@ -655,7 +654,7 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
   function requestsChart(c) {
     var rows = days.filter(function (d) { return d.n_requests !== null; }).map(function (d) { return { day: d.day, n: d.n_requests }; });
     return {
-      height: 190, padding: { left: 4, top: 8, bottom: 4, right: 12 },
+      height: 220, padding: { left: 4, top: 8, bottom: 4, right: 12 },
       data: { values: rows },
       mark: { type: "bar", color: c.neutral, width: { band: 0.5 }, cornerRadiusEnd: 4 },
       encoding: {
@@ -666,15 +665,24 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
     };
   }
 
+  function legendValues(rows) {
+    var ns = rows.map(function (r) { return r.n; });
+    var lo = Math.min.apply(null, ns), hi = Math.max.apply(null, ns);
+    var mid = Math.round((lo + hi) / 2);
+    var out = [lo];
+    if (mid > lo && mid < hi) out.push(mid);
+    if (hi > lo) out.push(hi);
+    return out;
+  }
   function sizedDots(rows, color, yTitle, sizeTitle, c, tooltip) {
     return {
-      height: 190, padding: { left: 4, top: 8, bottom: 4, right: 12 },
+      height: 220, padding: { left: 4, top: 8, bottom: 4, right: 12 },
       data: { values: rows },
       mark: { type: "point", filled: true, color: color, opacity: 1, stroke: c.surface, strokeWidth: 2 },
       encoding: {
         x: dayAxis(),
         y: { field: "rate", type: "quantitative", scale: { domain: [0, 100] }, axis: { title: yTitle, tickCount: 5, format: "d" } },
-        size: { field: "n", type: "quantitative", scale: { type: "sqrt", range: [70, 420], zero: true }, legend: { title: sizeTitle, format: "d", symbolType: "circle", symbolFillColor: c.neutral, symbolStrokeColor: c.surface } },
+        size: { field: "n", type: "quantitative", scale: { type: "sqrt", range: [70, 320], zero: true }, legend: { title: sizeTitle, values: legendValues(rows), columns: 4, titleLimit: 90, format: "d", symbolType: "circle", symbolFillColor: c.neutral, symbolStrokeColor: c.surface } },
         tooltip: tooltip
       }
     };
@@ -683,14 +691,14 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
     var rows = days.filter(function (d) { return d.n_requests; }).map(function (d) {
       return { day: d.day, rate: pctOf(d.n_errors, d.n_requests), n: d.n_requests, errors: d.n_errors };
     });
-    return sizedDots(rows, c.s[1], "Error rate (% of requests)", "n requests", c,
+    return sizedDots(rows, c.s[1], "Error rate (%)", "n requests", c,
       [{ field: "day", title: "Day" }, { field: "errors", title: "Errors" }, { field: "n", title: "Requests (n)" }, { field: "rate", title: "Error rate (%)", format: ".1f" }]);
   }
   function groundingChart(c) {
     var rows = days.filter(function (d) { return d.grounding_failure_share !== null && sumReasons(d) > 0; }).map(function (d) {
       return { day: d.day, rate: 100 * d.grounding_failure_share, n: sumReasons(d) };
     });
-    return sizedDots(rows, c.s[2], "Grounding failures (% of refusals)", "n refusals", c,
+    return sizedDots(rows, c.s[2], "Grounding failures (%)", "n refusals", c,
       [{ field: "day", title: "Day" }, { field: "n", title: "Refusals (n)" }, { field: "rate", title: "Grounding-failure share (%)", format: ".0f" }]);
   }
 
@@ -708,13 +716,13 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
       });
     });
     return {
-      height: 190, padding: { left: 4, top: 8, bottom: 4, right: 12 },
+      height: isNarrow("chart-refusals") ? 280 : 220, padding: { left: 4, top: 8, bottom: 4, right: 12 },
       data: { values: rows },
       mark: { type: "bar", width: { band: 0.5 }, stroke: c.surface, strokeWidth: 2 },
       encoding: {
         x: dayAxis(),
         y: { field: "n", type: "quantitative", aggregate: "sum", axis: { title: "Refusals (n)", tickMinStep: 1, format: "d" } },
-        color: { field: "reason", type: "nominal", scale: { domain: REASON_LABELS.map(function (p) { return p[1]; }), range: c.s }, legend: { title: null, columns: 2 } },
+        color: { field: "reason", type: "nominal", scale: { domain: REASON_LABELS.map(function (p) { return p[1]; }), range: c.s }, legend: { title: null, columns: isNarrow("chart-refusals") ? 1 : 3 } },
         order: { field: "reason", sort: "descending" },
         tooltip: [{ field: "day", title: "Day" }, { field: "reason", title: "Reason" }, { field: "n", title: "Refusals (n)" }]
       }
@@ -732,11 +740,16 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
       if (mine.length) ends.push(mine[mine.length - 1]);
     });
     var x = dayAxis();
-    var line = dotLine(rows, { domain: ["p50", "p95"], range: [c.s[0], c.s[1]] }, x, "Latency (seconds)",
+    var line = dotLine(rows, { domain: ["p50", "p95"], range: [c.s[0], c.s[1]] }, x, "Latency (s)",
       [{ field: "day", title: "Day" }, { field: "series", title: "Percentile" }, { field: "value", title: "Seconds", format: ".2f" }, { field: "n", title: "Requests (n)" }]);
-    var label = lineEndLabel(ends, c);
-    label.encoding.x = x;
-    return { height: 190, padding: { left: 4, top: 8, bottom: 4, right: 36 }, layer: [line, label] };
+    var labelled = !isNarrow("chart-traffic-latency");
+    var layers = [line];
+    if (labelled) {
+      var label = lineEndLabel(ends, c);
+      label.encoding.x = x;
+      layers.push(label);
+    }
+    return { height: 220, padding: { left: 4, top: 8, bottom: 4, right: labelled ? 36 : 12 }, layer: layers };
   }
 
   function renderCharts() {
