@@ -1,4 +1,6 @@
+import inspect
 import json
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -6,6 +8,7 @@ import httpx
 import pytest
 
 from rail_rag_monitor.probe import (
+    DEADLINE_S,
     PROBE_GOLDEN,
     ProbeRun,
     QuestionResult,
@@ -19,6 +22,12 @@ BASE = "https://demo.invalid"
 IDS = ["q01", "q06", "q09", "q10", "q14", "q15", "q17", "q18"]
 REFUSE = {"q17", "q18"}
 FIXED_NOW = datetime(2026, 11, 2, 6, 0, tzinfo=UTC)
+
+
+def trace_id(qid):
+    """A trace id shaped like Langfuse's: lowercase hex."""
+    return f"{IDS.index(qid) + 1:032x}"
+
 
 ANSWER_TEXT = "ZZANSWER-distinctive-answer-text"
 PASSAGE_TEXT = "ZZPASSAGE-distinctive-passage-text"
@@ -44,7 +53,7 @@ def good_body(qid):
             "refused": True,
             "refusal_reason": "low_retrieval_score",
             "citations": [],
-            "trace_id": f"trace-{qid}",
+            "trace_id": trace_id(qid),
         }
     docs = ITEMS[qid]["source_doc_ids"]
     return {
@@ -65,7 +74,7 @@ def good_body(qid):
             }
             for i, doc in enumerate(docs)
         ],
-        "trace_id": f"trace-{qid}",
+        "trace_id": trace_id(qid),
     }
 
 
@@ -106,18 +115,19 @@ class Demo:
         return self.attempts.get(qid, 0)
 
 
-def probe(demo, sleeps=None, kind="manual"):
+def probe(demo, sleeps=None, kind="manual", **kwargs):
     sleeps = [] if sleeps is None else sleeps
+    kwargs.setdefault("sleep", sleeps.append)
+    kwargs.setdefault("commit", "abc1234")
     return run_probe(
         BASE,
         GOLDEN,
         run_id="run-1",
         kind=kind,
-        commit="abc1234",
         client=demo.client(),
-        sleep=sleeps.append,
         now=lambda: FIXED_NOW,
         timer=demo.timer,
+        **kwargs,
     )
 
 
@@ -244,9 +254,10 @@ def test_429_not_retried():
     assert r.pass_ is None
     assert r.refused is None and r.grounding is None and r.latency_s is None
     assert demo.ask_count("q06") == 1
-    assert run.n_errors == 1
-    assert run.n_scored == 7
-    assert run.n_pass == 7
+    # D1: the 429 also ends the run, so everything after q06 is recorded as rate_limited
+    assert run.n_errors == 7
+    assert run.n_scored == 1
+    assert run.n_pass == 1
 
 
 def test_503_retried_3_times():
@@ -374,17 +385,17 @@ def test_latency_split():
 
 def test_latency_split_excludes_errors():
     def script(qid, attempt):
-        return 429 if qid == "q06" else good_body(qid)
+        return 500 if qid == "q06" else good_body(qid)
 
     lat = {"q01": 40.0, "q09": 2.0, "q10": 3.0, "q14": 4.0, "q15": 5.0, "q17": 6.0, "q18": 7.0}
     demo = Demo(script, latency=lambda qid, attempt: lat.get(qid, 0.5))
     run = probe(demo)
-    assert run.warm_p50_s == 4.5  # 2,3,4,5,6,7 (429 not counted)
+    assert run.warm_p50_s == 4.5  # 2,3,4,5,6,7 (the error is not counted)
 
 
 def test_trace_ids_kept():
     run = probe(Demo())
-    assert [run.results[q].trace_id for q in IDS] == [f"trace-{q}" for q in IDS]
+    assert [run.results[q].trace_id for q in IDS] == [trace_id(q) for q in IDS]
 
 
 def test_no_answer_text_in_row():
@@ -448,3 +459,222 @@ def test_question_result_to_dict_uses_pass_key():
 )
 def test_question_pass(expected, refused, grounding, want):
     assert question_pass(expected, refused, grounding) is want
+
+
+# --- privacy: every stored string is from a closed set or pattern (P3) ----------------------------
+
+
+def test_hostile_health_version_is_dropped():
+    for hostile in ("<script>alert(1)</script>", "SECRET version", "v" * 41, ""):
+        run = probe(Demo(health={"version": hostile}))
+        assert run.demo_version is None
+        assert "SECRET" not in json.dumps(run.to_dict())
+    assert (
+        probe(Demo(health={"version": "1.4.0+build.7-rc-1"})).demo_version == "1.4.0+build.7-rc-1"
+    )
+
+
+def test_hostile_trace_id_is_dropped():
+    def script(qid, attempt):
+        body = good_body(qid)
+        body["trace_id"] = {"q01": "SECRET", "q06": "ABCDEF0123456789", "q09": "a" * 15}.get(
+            qid, body["trace_id"]
+        )
+        return body
+
+    run = probe(Demo(script))
+    assert run.results["q01"].trace_id is None
+    assert run.results["q06"].trace_id is None  # uppercase hex is not a Langfuse id
+    assert run.results["q09"].trace_id is None  # too short
+    assert run.results["q10"].trace_id == trace_id("q10")
+    assert "SECRET" not in json.dumps(run.to_dict())
+
+
+def test_commit_is_a_sha_or_local():
+    assert probe(Demo(), commit="abc1234").commit == "abc1234"
+    assert probe(Demo(), commit="a" * 40).commit == "a" * 40
+    assert probe(Demo(), commit="local").commit == "local"
+    for hostile in ("SECRET-COMMIT", "</script>", "abc123", "a" * 41, "ABC1234"):
+        run = probe(Demo(), commit=hostile)
+        assert run.commit == "local"
+        assert "SECRET" not in json.dumps(run.to_dict())
+
+
+def test_every_stored_string_matches_its_pattern():
+    run = probe(Demo(lambda qid, attempt: 429 if qid == "q09" else good_body(qid)))
+    d = run.to_dict()
+    assert re.fullmatch(r"[0-9a-f]{7,40}|local", d["commit"])
+    for res in d["results"].values():
+        assert re.fullmatch(
+            r"ok|http_[0-9]{3}|timeout|connection|rate_limited|bad_response", res["status"]
+        )
+        assert res["trace_id"] is None or re.fullmatch(r"[0-9a-f]{16,64}", res["trace_id"])
+
+
+# --- demo safety (D1-D4) --------------------------------------------------------------------------
+
+
+def test_first_429_stops_all_further_requests():
+    def script(qid, attempt):
+        return 429 if qid == "q09" else good_body(qid)
+
+    demo = Demo(script)
+    sleeps = []
+    run = probe(demo, sleeps)
+    posts = [r for r in demo.requests if r[0] == "POST"]
+    assert len(posts) == 3  # q01, q06, q09 and nothing after the 429
+    assert list(run.results) == IDS
+    for qid in IDS[2:]:
+        r = run.results[qid]
+        assert r.status == "rate_limited"
+        assert (r.pass_, r.refused, r.grounding, r.latency_s, r.trace_id) == (
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    assert [run.results[q].status for q in IDS[:2]] == ["ok", "ok"]
+    assert run.n_errors == 6
+    assert run.n_scored == 2
+    # paced before q06 and q09 only: nothing is slept for the skipped questions
+    assert sleeps == [13.0, 13.0]
+
+
+def test_429_on_the_cold_question_skips_everything_else():
+    demo = Demo(lambda qid, attempt: 429)
+    sleeps = []
+    run = probe(demo, sleeps)
+    assert len([r for r in demo.requests if r[0] == "POST"]) == 1
+    assert all(r.status == "rate_limited" for r in run.results.values())
+    assert run.results["q01"].cold is True
+    assert sleeps == []
+    assert run.cold_latency_s is None
+
+
+def test_deadline_skips_remaining_questions_as_timeouts():
+    demo = Demo(latency=100.0)
+
+    def sleep(seconds):
+        demo.clock += seconds
+
+    # clock after q: 100 per answer + 13 per pace. Before q06: 113; q09: 226; q10: 339 >= 300
+    run = probe(demo, deadline_s=300.0, sleep=sleep)
+    posts = [r for r in demo.requests if r[0] == "POST"]
+    assert len(posts) == 3
+    assert [run.results[q].status for q in IDS[:3]] == ["ok", "ok", "ok"]
+    for qid in IDS[3:]:
+        r = run.results[qid]
+        assert r.status == "timeout"
+        assert (r.pass_, r.refused, r.grounding, r.latency_s, r.trace_id) == (
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    assert run.n_errors == 5
+
+
+def test_deadline_does_not_sleep_for_skipped_questions():
+    demo = Demo(latency=400.0)
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        demo.clock += seconds
+
+    run = probe(demo, deadline_s=300.0, sleep=sleep)
+    assert [run.results[q].status for q in IDS] == ["ok"] + ["timeout"] * 7
+    assert sleeps == [13.0]  # one pace before q06, after which the deadline had passed
+
+
+def test_deadline_default_is_18_minutes_and_keyword_only():
+    assert DEADLINE_S == 1080
+    param = inspect.signature(run_probe).parameters["deadline_s"]
+    assert param.kind is inspect.Parameter.KEYWORD_ONLY
+    assert param.default == DEADLINE_S
+
+
+def test_deadline_is_measured_from_the_start_of_the_run():
+    demo = Demo(latency=1.0)
+    demo.clock = 10_000.0  # a timer that does not start at zero
+    run = probe(demo, deadline_s=60.0)
+    assert run.n_errors == 0
+
+
+def test_cold_latency_is_the_total_of_all_attempts():
+    demo = None
+
+    def script(qid, attempt):
+        if qid == "q01" and attempt == 0:
+            demo.clock += 120.0
+            return httpx.ReadTimeout("slow")
+        return good_body(qid)
+
+    demo = Demo(script, latency=lambda qid, attempt: 3.0)
+    run = probe(demo)
+    assert run.results["q01"].status == "ok"
+    assert run.results["q01"].latency_s == 3.0  # the final attempt only
+    assert run.cold_latency_s == 123.0
+
+
+def test_200_without_refused_key_is_a_bad_response():
+    def script(qid, attempt):
+        body = good_body(qid)
+        if qid == "q09":
+            del body["refused"]
+        return body
+
+    run = probe(Demo(script))
+    r = run.results["q09"]
+    assert r.status == "bad_response"
+    assert r.pass_ is None and r.refused is None
+    assert run.n_errors == 1
+    assert run.n_scored == 7
+
+
+# --- remaining coverage (D5) ----------------------------------------------------------------------
+
+
+def test_pace_sleep_follows_a_timeout_question():
+    demo = Demo(lambda qid, attempt: httpx.ReadTimeout("slow") if qid == "q06" else good_body(qid))
+    sleeps = []
+    probe(demo, sleeps)
+    assert sleeps == [13.0] * 7
+
+
+def test_pace_sleep_follows_an_exhausted_503_question():
+    demo = Demo(lambda qid, attempt: 503 if qid == "q06" else good_body(qid))
+    sleeps = []
+    probe(demo, sleeps)
+    assert sleeps.count(13.0) == 7
+    assert sleeps.count(15.0) == 3
+    assert len(sleeps) == 10
+
+
+def test_single_warm_call_gives_that_value_for_both_percentiles():
+    def script(qid, attempt):
+        return good_body(qid) if qid in ("q01", "q09") else 500
+
+    demo = Demo(script, latency=lambda qid, attempt: 7.5)
+    run = probe(demo)
+    assert run.warm_p50_s == 7.5
+    assert run.warm_p95_s == 7.5
+
+
+def test_no_warm_calls_gives_none():
+    demo = Demo(lambda qid, attempt: good_body(qid) if qid == "q01" else 500)
+    run = probe(demo)
+    assert run.warm_p50_s is None
+    assert run.warm_p95_s is None
+    assert run.cold_latency_s == 1.0
+
+
+def test_cold_non_timeout_error_leaves_cold_latency_none():
+    for failure in (httpx.ConnectError("down"), 500, 503):
+        demo = Demo(lambda qid, attempt, f=failure: f if qid == "q01" else good_body(qid))
+        run = probe(demo)
+        assert run.results["q01"].status != "ok"
+        assert run.cold_latency_s is None
+        assert run.warm_p50_s is not None

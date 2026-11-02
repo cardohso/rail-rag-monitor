@@ -46,7 +46,7 @@ def good_body(qid):
             "refused": True,
             "refusal_reason": "low_retrieval_score",
             "citations": [],
-            "trace_id": f"trace-{qid}",
+            "trace_id": f"{IDS.index(qid) + 1:032x}",
         }
     docs = ITEMS[qid]["source_doc_ids"]
     return {
@@ -67,7 +67,7 @@ def good_body(qid):
             }
             for i, doc in enumerate(docs)
         ],
-        "trace_id": f"trace-{qid}",
+        "trace_id": f"{IDS.index(qid) + 1:032x}",
     }
 
 
