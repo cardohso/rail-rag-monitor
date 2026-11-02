@@ -1,0 +1,16 @@
+{
+  "rules": {
+    "uptime": {
+      "issue": null,
+      "clean_runs": 0
+    },
+    "quality": {
+      "issue": null,
+      "clean_runs": 0
+    },
+    "latency": {
+      "issue": null,
+      "clean_runs": 0
+    }
+  }
+}
