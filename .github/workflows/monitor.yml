@@ -1,0 +1,160 @@
+name: Monitor
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      plant_regression:
+        description: "Dry run: plant a regression in memory and open [dry-run] issues. Skips the probe."
+        type: boolean
+        default: false
+      noise_runs:
+        description: "Back-to-back noise probe runs (0 = a normal manual run, at most 5)."
+        type: number
+        default: 0
+
+permissions:
+  contents: write
+  issues: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+env:
+  # Repository variable DEMO_URL overrides the default demo.
+  DEMO_URL: ${{ vars.DEMO_URL || 'https://rail-rag.calmcliff-0073b8b6.switzerlandnorth.azurecontainerapps.io' }}
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+
+      - name: Install
+        run: uv sync --locked
+
+      - name: Create the data branch on the first run
+        run: |
+          if ! git ls-remote --exit-code --heads origin data > /dev/null 2>&1; then
+            empty_tree=$(git mktree < /dev/null)
+            commit=$(git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit-tree "$empty_tree" -m "chore: initialise data branch")
+            git push origin "$commit:refs/heads/data"
+          fi
+
+      - name: Check out the data branch
+        uses: actions/checkout@v7
+        with:
+          ref: data
+          path: data
+
+      # The next four steps never stop the run: the data, the site and an uptime alert are what
+      # we want when the demo is down. "Fail the job at the end" turns any failure red.
+      - name: Probe
+        id: probe
+        if: ${{ !inputs.plant_regression }}
+        continue-on-error: true
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          NOISE_RUNS: ${{ inputs.noise_runs }}
+        run: |
+          if [ "${NOISE_RUNS:-0}" != "0" ]; then
+            uv run python -m rail_rag_monitor probe --kind noise --repeat "$NOISE_RUNS"
+          elif [ "$EVENT_NAME" = "schedule" ]; then
+            uv run python -m rail_rag_monitor probe --kind scheduled
+          else
+            uv run python -m rail_rag_monitor probe --kind manual
+          fi
+
+      - name: Collect yesterday's traffic
+        id: collect
+        continue-on-error: true
+        env:
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+        run: uv run python -m rail_rag_monitor collect
+
+      - name: Noise report
+        id: noise
+        continue-on-error: true
+        run: uv run python -m rail_rag_monitor noise-report
+
+      - name: Alerts
+        id: alert
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+          PLANT: ${{ inputs.plant_regression }}
+        run: |
+          if [ "$PLANT" = "true" ]; then
+            uv run python -m rail_rag_monitor alert --plant-regression
+          else
+            uv run python -m rail_rag_monitor alert
+          fi
+
+      - name: Build the site
+        id: site
+        continue-on-error: true
+        run: uv run python -m rail_rag_monitor build-site --out site
+
+      - name: Commit the data
+        working-directory: data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Only the stored tables and state, never a stray temp file and never `git add -A`.
+          { find metrics alerts -maxdepth 1 -type f \( -name '*.jsonl' -o -name '*.json' \) \
+              -print0 2> /dev/null || true; } | xargs -0 -r git add --
+          if git diff --cached --quiet; then
+            echo "No data changes to commit."
+          else
+            git commit -m "data: monitor run ${GITHUB_RUN_ID}"
+            git push origin HEAD:data
+          fi
+
+      - name: Upload the site
+        if: ${{ steps.site.outcome == 'success' }}
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+      - name: Deploy the site
+        id: deployment
+        if: ${{ steps.site.outcome == 'success' }}
+        uses: actions/deploy-pages@v5
+
+      - name: Fail the job if the probe, collection, alerts or site failed
+        if: ${{ always() }}
+        env:
+          OUTCOMES: >-
+            probe=${{ steps.probe.outcome }}
+            collect=${{ steps.collect.outcome }}
+            noise-report=${{ steps.noise.outcome }}
+            alert=${{ steps.alert.outcome }}
+            build-site=${{ steps.site.outcome }}
+        run: |
+          failed=0
+          for item in $OUTCOMES; do
+            case "$item" in
+              *=failure) echo "::error::step ${item%%=*} failed"; failed=1 ;;
+            esac
+          done
+          exit "$failed"
