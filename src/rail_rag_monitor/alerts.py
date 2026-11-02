@@ -3,6 +3,18 @@
 `evaluate` takes probe run dicts (as written by `ProbeRun.to_dict()`) in chronological order.
 The recent window is the last `RECENT_RUNS` runs; the baseline is the up to `BASELINE_MAX_RUNS`
 non-dry-run runs before it. Runs of kind `dry-run` never count toward a baseline.
+
+Notes on what the rules measure:
+- Uptime counts every status other than "ok" as an error: HTTP 4xx (`http_NNN`) and `bad_response`
+  as well as timeouts, connection failures and 5xx.
+- The quality `delta` (see `simulate_delta`) assumes a full `BASELINE_MAX_RUNS` baseline. With
+  fewer baseline runs (down to `MIN_BASELINE_RUNS`) it is a little optimistic; the false-alarm
+  rate on noise stays under 1% (about 0.3% at 7 runs).
+- The latency baseline is the same window as the quality baseline, restricted to runs that
+  have a warm p95.
+- The quality rule fires only when the one-sided Fisher p-value is below `ALPHA` and the rise
+  is at least `delta`. Fisher is what decides at these sample sizes: the `DELTA_FLOOR` of 2/24
+  never binds, because any rise that clears the p-value gate is already larger than that.
 """
 
 from __future__ import annotations

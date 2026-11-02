@@ -41,7 +41,15 @@ _MISSING = "n/a"
 
 
 class GitHubError(RuntimeError):
-    """A GitHub API call failed. The message never contains the token or a response body."""
+    """A GitHub API call failed. The message never contains the token or a response body.
+
+    `status_code` is the HTTP status of the failing response, or None when there was none
+    (transport error, malformed body).
+    """
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class SyncError(RuntimeError):
@@ -87,14 +95,31 @@ class GitHubIssues:
             response = self._client.request(method, url, json=json)
         except httpx.HTTPError as exc:
             raise GitHubError(f"GitHub {method} {url} failed: {type(exc).__name__}") from None
-        if response.status_code >= 400:
-            raise GitHubError(f"GitHub {method} {url} failed: HTTP {response.status_code}")
+        if response.status_code >= 300:  # redirects (a renamed repo) are not success either
+            raise GitHubError(
+                f"GitHub {method} {url} failed: HTTP {response.status_code}",
+                response.status_code,
+            )
         return response
+
+    @staticmethod
+    def _json_object(response: httpx.Response, what: str) -> dict:
+        """The JSON object in a 2xx response. The body is never put in an error."""
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            raise GitHubError(f"GitHub {what} returned an unexpected response")
+        return body
 
     def create(self, title: str, body: str, labels: list[str]) -> int:
         payload = {"title": title, "body": body, "labels": labels}
         response = self._request("POST", "/issues", json=payload)
-        return int(response.json()["number"])
+        number = self._json_object(response, "issue creation").get("number")
+        if isinstance(number, bool) or not isinstance(number, int):
+            raise GitHubError("GitHub issue creation returned an unexpected response")
+        return number
 
     def comment(self, number: int, body: str) -> None:
         self._request("POST", f"/issues/{int(number)}/comments", json={"body": body})
@@ -106,10 +131,10 @@ class GitHubIssues:
         try:
             response = self._request("GET", f"/issues/{int(number)}")
         except GitHubError as exc:
-            if "HTTP 404" in str(exc) or "HTTP 410" in str(exc):
+            if exc.status_code in (404, 410):
                 return False
             raise
-        return response.json().get("state") == "open"
+        return self._json_object(response, "issue lookup").get("state") == "open"
 
 
 # --- body rendering -------------------------------------------------------------------------
@@ -291,7 +316,12 @@ def _sync_rule(
     project_id: str | None,
     dry_run: bool,
 ) -> None:
-    """Apply one rule to `new` in place. An API failure leaves that rule's entry untouched."""
+    """Apply one rule to `new` in place.
+
+    A firing run resets `clean_runs` before it calls GitHub, so a failed call cannot leave banked
+    clean runs behind (one later clean run would otherwise close an issue that is still firing).
+    Any other API failure leaves that rule's entry as it was.
+    """
     if dry_run:
         # Dry runs open or comment on their own issues and never close anything.
         if alert is not None:
@@ -303,10 +333,10 @@ def _sync_rule(
 
     entry = new["rules"].setdefault(rule, {"issue": None, "clean_runs": 0})
     if alert is not None:
+        entry["clean_runs"] = 0
         entry["issue"] = _fire(
             alert, entry.get("issue"), gh, run_url=run_url, project_id=project_id, dry_run=False
         )
-        entry["clean_runs"] = 0
         return
     issue = entry.get("issue")
     if issue is None:

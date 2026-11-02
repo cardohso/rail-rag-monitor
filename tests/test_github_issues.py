@@ -436,3 +436,223 @@ def test_sync_error_never_contains_token():
         assert TOKEN not in text
     assert "uptime" in str(info.value) and "quality" in str(info.value)
     assert TOKEN not in repr(info.value.__cause__)
+
+
+# --- hardening (H-B) --------------------------------------------------------------------------
+
+
+def test_requests_carry_the_github_headers():
+    fake = FakeGitHub()
+    run_sync([quality_alert()], {"rules": {}}, fake)
+    headers = fake.requests[0].headers
+    assert headers["Accept"] == "application/vnd.github+json"
+    assert headers["X-GitHub-Api-Version"] == "2022-11-28"
+    assert headers["User-Agent"] == "rail-rag-monitor"
+
+
+def test_trace_links_appear_in_the_firing_comment():
+    fake = FakeGitHub(open_issues={7})
+    run_sync([quality_alert()], {"rules": {"quality": {"issue": 7, "clean_runs": 0}}}, fake)
+    assert fake.calls()[1] == ("POST", f"/repos/{REPO}/issues/7/comments")
+    comment = fake.json_body(1)["body"]
+    assert comment.startswith("Alert fired again.")
+    assert "https://cloud.langfuse.com/project/proj1/traces/tr-aaa" in comment
+    assert "https://cloud.langfuse.com/project/proj1/traces/tr-bbb" in comment
+    assert RUN_URL in comment
+
+
+def test_is_open_treats_410_as_closed():
+    gh = GitHubIssues(REPO, TOKEN, transport=httpx.MockTransport(lambda r: httpx.Response(410)))
+    assert gh.is_open(9) is False
+
+
+def test_github_error_carries_the_status_code():
+    gh = GitHubIssues(REPO, TOKEN, transport=httpx.MockTransport(lambda r: httpx.Response(403)))
+    with pytest.raises(GitHubError) as info:
+        gh.comment(1, "b")
+    assert info.value.status_code == 403
+    assert GitHubError("no response").status_code is None
+
+    def boom(request):
+        raise httpx.ConnectError("x")
+
+    gh = GitHubIssues(REPO, TOKEN, transport=httpx.MockTransport(boom))
+    with pytest.raises(GitHubError) as info:
+        gh.comment(1, "b")
+    assert info.value.status_code is None
+
+
+def test_is_open_does_not_match_status_text_in_the_message():
+    # A 500 whose message happens to contain "HTTP 404" is still an error, not "closed".
+    def handler(request):
+        return httpx.Response(500)
+
+    gh = GitHubIssues(REPO, TOKEN, transport=httpx.MockTransport(handler))
+    with pytest.raises(GitHubError) as info:
+        gh.is_open(404)
+    assert info.value.status_code == 500
+
+
+@pytest.mark.parametrize("status", [301, 302, 307, 308])
+def test_redirects_are_errors(status):
+    # A renamed repository answers with a redirect; that must not look like success.
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(
+            status,
+            headers={"Location": "https://api.github.com/repositories/1/issues"},
+            json={"number": 5},
+        )
+
+    gh = GitHubIssues(REPO, TOKEN, transport=httpx.MockTransport(handler))
+    with pytest.raises(GitHubError) as info:
+        gh.create("t", "b", ["monitor-alert"])
+    assert info.value.status_code == status
+    assert str(status) in str(info.value)
+    with pytest.raises(GitHubError):
+        gh.close(5)
+    with pytest.raises(GitHubError):
+        gh.is_open(5)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, json={}),
+        httpx.Response(200, json={"number": "abc"}),
+        httpx.Response(200, json={"number": None}),
+        httpx.Response(200, json={"number": True}),
+        httpx.Response(200, json=[1, 2]),
+        httpx.Response(200, content=b"<html>SECRET-BODY</html>"),
+        httpx.Response(200, content=b""),
+    ],
+)
+def test_create_wraps_a_malformed_2xx_body(response):
+    gh = GitHubIssues(REPO, TOKEN, transport=httpx.MockTransport(lambda r: response))
+    with pytest.raises(GitHubError) as info:
+        gh.create("t", "b", ["monitor-alert"])
+    assert "SECRET-BODY" not in str(info.value)
+    assert TOKEN not in str(info.value)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, content=b"not json"),
+        httpx.Response(200, content=b""),
+        httpx.Response(200, json=[{"state": "open"}]),
+        httpx.Response(200, json="open"),
+    ],
+)
+def test_is_open_wraps_a_malformed_2xx_body(response):
+    gh = GitHubIssues(REPO, TOKEN, transport=httpx.MockTransport(lambda r: response))
+    with pytest.raises(GitHubError):
+        gh.is_open(7)
+
+
+def test_unknown_rule_name_is_rejected_before_any_request():
+    fake = FakeGitHub()
+    bad = Alert("bogus rule\nSECRET", "s", {})
+    with pytest.raises(ValueError, match="unknown alert rule") as info:
+        run_sync([quality_alert(), bad], {"rules": {}}, fake)
+    assert fake.requests == []
+    assert "SECRET" not in str(info.value)
+    with pytest.raises(ValueError, match="unknown alert rule"):
+        render_body(bad, RUN_URL, "proj1")
+
+
+def test_dry_run_never_patches_while_real_issues_are_open():
+    fake = FakeGitHub(open_issues={7, 8, 9, 50})
+    state = {
+        "rules": {
+            "uptime": {"issue": 7, "clean_runs": 2},
+            "quality": {"issue": 8, "clean_runs": 2},
+            "latency": {"issue": 9, "clean_runs": 2},
+        },
+        "dry_run_issues": {"quality": 50},
+    }
+    new = run_sync([quality_alert()], state, fake, dry_run=True)
+    assert not any(method == "PATCH" for method, _ in fake.calls())
+    assert fake.calls() == [
+        ("GET", f"/repos/{REPO}/issues/50"),
+        ("POST", f"/repos/{REPO}/issues/50/comments"),
+    ]
+    assert new["rules"] == state["rules"]
+
+
+class MalformedCreateFake(FakeGitHub):
+    """Like FakeGitHub, but creating a `fail_rules` issue returns 200 with a body lacking the id."""
+
+    def __init__(self, fail_rules, **kwargs):
+        super().__init__(**kwargs)
+        self.fail_rules = fail_rules
+
+    def __call__(self, request):
+        if request.method == "POST" and request.url.path == f"/repos/{REPO}/issues":
+            title = json.loads(request.content)["title"]
+            if any(f"[monitor] {rule} alert" in title for rule in self.fail_rules):
+                self.requests.append(request)
+                return httpx.Response(200, json={})
+        return super().__call__(request)
+
+
+def test_malformed_create_body_still_returns_sync_error_with_partial_state():
+    fake = MalformedCreateFake({"quality"})
+    with pytest.raises(SyncError) as info:
+        run_sync(
+            [uptime_alert(), quality_alert(), latency_alert()],
+            {"rules": {}},
+            fake,
+        )
+    state = info.value.state
+    assert state["rules"]["uptime"] == {"issue": 100, "clean_runs": 0}
+    assert state["rules"]["quality"] == {"issue": None, "clean_runs": 0}
+    assert state["rules"]["latency"] == {"issue": 101, "clean_runs": 0}
+    assert isinstance(info.value.__cause__, GitHubError)
+    assert "quality" in str(info.value)
+
+
+def test_malformed_is_open_body_does_not_lose_partial_state():
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, content=b"not json")
+        return httpx.Response(201, json={"number": 100})
+
+    gh = GitHubIssues(REPO, TOKEN, transport=httpx.MockTransport(handler))
+    state = {"rules": {"quality": {"issue": 7, "clean_runs": 1}}}
+    with pytest.raises(SyncError) as info:
+        sync(
+            [uptime_alert(), quality_alert()],
+            state,
+            gh,
+            run_url=RUN_URL,
+            project_id="proj1",
+            dry_run=False,
+        )
+    assert info.value.state["rules"]["uptime"]["issue"] == 100
+    assert info.value.state["rules"]["quality"]["issue"] == 7
+
+
+def test_failed_fire_resets_the_clean_run_count_first():
+    # Issue 7 was reported open with 2 clean runs banked. The firing run's GET fails: the count
+    # must already be 0, so one later clean run cannot close the issue.
+    failing = {"on": True}
+
+    def handler(request):
+        if request.method == "GET" and failing["on"]:
+            return httpx.Response(500)
+        return FakeGitHub(open_issues={7})(request)
+
+    gh = GitHubIssues(REPO, TOKEN, transport=httpx.MockTransport(handler))
+    state = {"rules": {"quality": {"issue": 7, "clean_runs": 2}}}
+    with pytest.raises(SyncError) as info:
+        sync([quality_alert()], state, gh, run_url=RUN_URL, project_id="p", dry_run=False)
+    saved = info.value.state
+    assert saved["rules"]["quality"] == {"issue": 7, "clean_runs": 0}
+    assert state == {"rules": {"quality": {"issue": 7, "clean_runs": 2}}}
+
+    failing["on"] = False
+    after = sync([], saved, gh, run_url=RUN_URL, project_id="p", dry_run=False)
+    assert after["rules"]["quality"] == {"issue": 7, "clean_runs": 1}

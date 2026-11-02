@@ -1,6 +1,6 @@
 import random
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from rail_rag_monitor.alerts import (
     ALPHA,
@@ -257,16 +257,14 @@ NOISE_RATES = {
 }
 
 
-def test_noise_does_not_fire():
-    started = time.perf_counter()
+def false_alarm_rate(n_baseline, *, seed=12345, windows=10_000):
+    """Share of all-noise windows (`n_baseline` runs, then 3 recent) that raise a quality alert."""
     delta = simulate_delta(NOISE_RATES)
-    assert delta >= DELTA_FLOOR
-    rng = random.Random(12345)  # separate generator from simulate_delta's own
-    windows = 10_000
+    rng = random.Random(seed)  # separate generator from simulate_delta's own
     fired = 0
     for _ in range(windows):
         runs = []
-        for i in range(17):
+        for i in range(n_baseline + 3):
             run = make_run(i)
             for qid, rate in NOISE_RATES.items():
                 if rng.random() >= rate:
@@ -274,10 +272,40 @@ def test_noise_does_not_fire():
             runs.append(run)
         if any(a.rule == "quality" for a in evaluate(runs, delta)):
             fired += 1
-    print(
-        f"delta={delta:.4f} false alarms={fired}/{windows} in {time.perf_counter() - started:.1f}s"
-    )
-    assert fired / windows <= 0.01
+    return delta, fired / windows
+
+
+def test_noise_does_not_fire():
+    started = time.perf_counter()
+    delta, rate = false_alarm_rate(14)
+    assert delta >= DELTA_FLOOR
+    print(f"delta={delta:.4f} false alarms={rate:.2%} in {time.perf_counter() - started:.1f}s")
+    assert rate <= 0.01
+
+
+def test_noise_does_not_fire_with_the_minimum_7_run_baseline():
+    # delta assumes a full 14-run baseline; with only 7 the baseline is noisier. Measured 0.30%.
+    delta, rate = false_alarm_rate(7)
+    print(f"7-run baseline: delta={delta:.4f} false alarms={rate:.2%}")
+    assert rate <= 0.01
+
+
+def test_borderline_three_fails_fire_at_the_floor_but_not_at_the_noise_delta():
+    # 3 fails in 24 recent results over a clean 14-run baseline: rate 0.125, Fisher p = 0.0049.
+    runs = [make_run(i) for i in range(14)]
+    runs += [
+        make_run(14, fails=("q01",)),
+        make_run(15, fails=("q06",)),
+        make_run(16, fails=("q09",)),
+    ]
+    alerts = evaluate(runs, DELTA)
+    assert kinds(alerts) == ["quality"]
+    assert alerts[0].details["fail_recent"] == 3
+    assert alerts[0].details["p_value"] < ALPHA
+    noise_delta = simulate_delta(NOISE_RATES)
+    assert abs(noise_delta - 0.1369) < 5e-5
+    assert 3 / 24 < noise_delta
+    assert evaluate(runs, noise_delta) == []
 
 
 def test_alpha_constant():
@@ -343,4 +371,4 @@ def test_noise_report_without_qualifying_runs():
 
 def test_noise_report_default_clock_is_utc_iso():
     stamp = noise_report([])["computed_at"]
-    assert datetime.fromisoformat(stamp).utcoffset() is not None
+    assert datetime.fromisoformat(stamp).utcoffset() == timedelta(0)
