@@ -8,9 +8,12 @@ non-dry-run runs before it. Runs of kind `dry-run` never count toward a baseline
 from __future__ import annotations
 
 import copy
+import itertools
 import random
 import statistics
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Literal
 
 from rail_rag_monitor.stats import fisher_one_sided, percentile
@@ -26,6 +29,7 @@ CLEAN_RUNS_TO_CLOSE = 3
 UPTIME_RUNS = 2
 LATENCY_RUNS = 2
 DRY_RUN = "dry-run"
+NOISE_KINDS = ("noise", "scheduled")
 PLANTED_QUESTIONS = ("q01", "q06", "q09", "q10")
 
 
@@ -224,3 +228,37 @@ def simulate_delta(pass_rates: dict[str, float], *, seed: int = 0, draws: int = 
         diffs.append(fail_recent / n_recent - fail_base / n_base)
     p99 = percentile(diffs, 0.99)
     return max(DELTA_FLOOR, p99 if p99 is not None else DELTA_FLOOR)
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def noise_report(runs: list[dict], *, now: Callable[[], datetime] = _utcnow) -> dict:
+    """Per-question pass rates and flip counts from repeated probe runs, plus the simulated delta.
+
+    Only runs of kind `noise` and `scheduled` count; `dry-run` and `manual` runs are ignored.
+    `runs` is chronological. A result whose `pass` is None (not scored) is excluded from that
+    question's rate and skipped when counting flips, so it never counts as a fail. `flips[qid]` is
+    the number of pass<->fail changes between consecutive scored results. A question that was
+    never scored has no entry. With no qualifying runs the rates are empty and delta is
+    DELTA_FLOOR.
+    """
+    used = [run for run in runs if run.get("kind") in NOISE_KINDS]
+    history: dict[str, list[bool]] = {}
+    for run in used:
+        for qid, res in _results(run).items():
+            passed = res.get("pass")
+            if passed is not None:
+                history.setdefault(qid, []).append(bool(passed))
+    pass_rates = {qid: sum(seq) / len(seq) for qid, seq in sorted(history.items())}
+    flips = {
+        qid: sum(a != b for a, b in itertools.pairwise(seq)) for qid, seq in sorted(history.items())
+    }
+    return {
+        "n_runs": len(used),
+        "pass_rates": pass_rates,
+        "delta": simulate_delta(pass_rates) if pass_rates else DELTA_FLOOR,
+        "flips": flips,
+        "computed_at": now().isoformat(),
+    }

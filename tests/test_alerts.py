@@ -1,11 +1,13 @@
 import random
 import time
+from datetime import UTC, datetime
 
 from rail_rag_monitor.alerts import (
     ALPHA,
     DELTA_FLOOR,
     Alert,
     evaluate,
+    noise_report,
     planted_runs,
     simulate_delta,
 )
@@ -280,3 +282,65 @@ def test_noise_does_not_fire():
 
 def test_alpha_constant():
     assert ALPHA == 0.01
+
+
+FIXED_NOW = datetime(2026, 11, 2, 12, 0, tzinfo=UTC)
+
+
+def noise_run(i, q18, *, kind="noise"):
+    run = make_run(i, kind=kind)
+    run["results"]["q18"]["pass"] = q18
+    return run
+
+
+def test_noise_report():
+    runs = [
+        noise_run(0, True),
+        noise_run(1, False),
+        noise_run(2, True, kind="scheduled"),
+        noise_run(3, True),
+        noise_run(4, False, kind="dry-run"),  # ignored
+        noise_run(5, False, kind="manual"),  # ignored
+    ]
+    report = noise_report(runs, now=lambda: FIXED_NOW)
+    assert set(report) == {"n_runs", "pass_rates", "delta", "flips", "computed_at"}
+    assert report["n_runs"] == 4
+    assert report["pass_rates"]["q18"] == 0.75
+    assert report["pass_rates"]["q01"] == 1.0
+    assert set(report["pass_rates"]) == set(IDS)
+    assert report["flips"]["q18"] == 2  # pass -> fail -> pass
+    assert report["flips"]["q01"] == 0
+    assert report["delta"] == simulate_delta(report["pass_rates"])
+    assert report["computed_at"] == FIXED_NOW.isoformat()
+
+
+def test_noise_report_unscored_results_are_not_fails_or_flips():
+    # q18 is unscored in run 1: it is dropped from the rate and does not break the flip chain.
+    runs = [noise_run(0, True), noise_run(1, None), noise_run(2, True), noise_run(3, False)]
+    report = noise_report(runs, now=lambda: FIXED_NOW)
+    assert report["n_runs"] == 4
+    assert report["pass_rates"]["q18"] == 2 / 3
+    assert report["flips"]["q18"] == 1
+    # A question that is never scored has no rate and no flips entry.
+    never = [noise_run(0, None), noise_run(1, None)]
+    report = noise_report(never, now=lambda: FIXED_NOW)
+    assert "q18" not in report["pass_rates"]
+    assert "q18" not in report["flips"]
+    assert report["pass_rates"]["q01"] == 1.0
+
+
+def test_noise_report_without_qualifying_runs():
+    for runs in ([], [noise_run(0, True, kind="dry-run"), noise_run(1, True, kind="manual")]):
+        report = noise_report(runs, now=lambda: FIXED_NOW)
+        assert report == {
+            "n_runs": 0,
+            "pass_rates": {},
+            "delta": DELTA_FLOOR,
+            "flips": {},
+            "computed_at": FIXED_NOW.isoformat(),
+        }
+
+
+def test_noise_report_default_clock_is_utc_iso():
+    stamp = noise_report([])["computed_at"]
+    assert datetime.fromisoformat(stamp).utcoffset() is not None
