@@ -7,6 +7,7 @@ from rail_rag_monitor.alerts import Alert
 from rail_rag_monitor.github_issues import (
     GitHubError,
     GitHubIssues,
+    SyncError,
     render_body,
     sync,
     trace_url,
@@ -370,3 +371,68 @@ def test_rejects_bad_token_without_echoing_it(token):
     with pytest.raises(ValueError) as info:
         GitHubIssues(REPO, token, transport=httpx.MockTransport(FakeGitHub()))
     assert token not in str(info.value) or token == ""
+
+
+class FailingFake(FakeGitHub):
+    """Like FakeGitHub, but creating an issue whose title mentions a rule in `fail_rules` is 403."""
+
+    def __init__(self, fail_rules, **kwargs):
+        super().__init__(**kwargs)
+        self.fail_rules = fail_rules
+
+    def __call__(self, request):
+        if request.method == "POST" and request.url.path == f"/repos/{REPO}/issues":
+            title = json.loads(request.content)["title"]
+            if any(f"[monitor] {rule} alert" in title for rule in self.fail_rules):
+                self.requests.append(request)
+                return httpx.Response(403, json={"message": f"echo {TOKEN}"})
+        return super().__call__(request)
+
+
+def test_mid_sync_failure_keeps_earlier_issue_numbers():
+    fake = FailingFake({"quality"})
+    with pytest.raises(SyncError) as info:
+        run_sync([uptime_alert(), quality_alert()], {"rules": {}}, fake)
+
+    state = info.value.state
+    assert state["rules"]["uptime"] == {"issue": 100, "clean_runs": 0}
+    assert state["rules"]["quality"] == {"issue": None, "clean_runs": 0}
+    assert isinstance(info.value.__cause__, GitHubError)
+
+    # A rerun with the saved state comments on the uptime issue instead of duplicating it.
+    fake2 = FakeGitHub(open_issues={100}, next_number=200)
+    new = run_sync([uptime_alert(), quality_alert()], state, fake2)
+    assert ("POST", f"/repos/{REPO}/issues/100/comments") in fake2.calls()
+    assert fake2.calls().count(("POST", f"/repos/{REPO}/issues")) == 1
+    assert new["rules"]["uptime"]["issue"] == 100
+    assert new["rules"]["quality"]["issue"] == 200
+
+
+def test_failing_first_rule_does_not_stop_next_rule():
+    fake = FailingFake({"uptime"})
+    with pytest.raises(SyncError) as info:
+        run_sync([uptime_alert(), latency_alert()], {"rules": {}}, fake)
+    state = info.value.state
+    assert state["rules"]["uptime"]["issue"] is None
+    assert state["rules"]["latency"] == {"issue": 100, "clean_runs": 0}
+    assert "uptime" in str(info.value) and "latency" not in str(info.value)
+
+
+def test_dry_run_mid_sync_failure_keeps_partial_dry_run_issues():
+    fake = FailingFake({"quality"})
+    state = {"rules": {"quality": {"issue": 7, "clean_runs": 2}}}
+    with pytest.raises(SyncError) as info:
+        run_sync([uptime_alert(), quality_alert(), latency_alert()], state, fake, dry_run=True)
+    new = info.value.state
+    assert new["dry_run_issues"] == {"uptime": 100, "latency": 101}
+    assert new["rules"] == state["rules"]
+
+
+def test_sync_error_never_contains_token():
+    fake = FailingFake({"quality", "uptime"})
+    with pytest.raises(SyncError) as info:
+        run_sync([uptime_alert(), quality_alert()], {"rules": {}}, fake)
+    for text in (str(info.value), repr(info.value), str(info.value.__cause__)):
+        assert TOKEN not in text
+    assert "uptime" in str(info.value) and "quality" in str(info.value)
+    assert TOKEN not in repr(info.value.__cause__)

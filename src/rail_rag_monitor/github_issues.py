@@ -44,6 +44,17 @@ class GitHubError(RuntimeError):
     """A GitHub API call failed. The message never contains the token or a response body."""
 
 
+class SyncError(RuntimeError):
+    """One or more rules failed to sync. `.state` is the up-to-date state, including every issue
+    number created or closed before and after the failure; save it before exiting non-zero.
+    `__cause__` is the first underlying `GitHubError`. The message has only rule names and
+    exception class names, never the token or a response body."""
+
+    def __init__(self, message: str, state: dict):
+        super().__init__(message)
+        self.state = state
+
+
 def trace_url(project_id: str, trace_id: str) -> str:
     return f"{LANGFUSE_URL}/project/{project_id}/traces/{trace_id}"
 
@@ -270,6 +281,50 @@ def _fire(
     return gh.create(_title(alert.rule, dry_run), body, _labels(alert.rule, dry_run))
 
 
+def _sync_rule(
+    rule: str,
+    alert: Alert | None,
+    new: dict,
+    gh: GitHubIssues,
+    *,
+    run_url: str,
+    project_id: str | None,
+    dry_run: bool,
+) -> None:
+    """Apply one rule to `new` in place. An API failure leaves that rule's entry untouched."""
+    if dry_run:
+        # Dry runs open or comment on their own issues and never close anything.
+        if alert is not None:
+            dry = new.setdefault("dry_run_issues", {})
+            dry[rule] = _fire(
+                alert, dry.get(rule), gh, run_url=run_url, project_id=project_id, dry_run=True
+            )
+        return
+
+    entry = new["rules"].setdefault(rule, {"issue": None, "clean_runs": 0})
+    if alert is not None:
+        entry["issue"] = _fire(
+            alert, entry.get("issue"), gh, run_url=run_url, project_id=project_id, dry_run=False
+        )
+        entry["clean_runs"] = 0
+        return
+    issue = entry.get("issue")
+    if issue is None:
+        entry["clean_runs"] = 0
+        return
+    clean_runs = entry.get("clean_runs", 0) + 1
+    if clean_runs >= CLEAN_RUNS_TO_CLOSE:
+        if gh.is_open(issue):
+            gh.comment(
+                issue,
+                f"Alert recovered after {CLEAN_RUNS_TO_CLOSE} clean runs. Closing this issue.",
+            )
+            gh.close(issue)
+        entry["issue"] = None
+        clean_runs = 0
+    entry["clean_runs"] = clean_runs
+
+
 def sync(
     alerts: list[Alert],
     state: dict,
@@ -279,45 +334,36 @@ def sync(
     project_id: str | None,
     dry_run: bool,
 ) -> dict:
-    """Apply this run's alerts to GitHub and return the new state (the input is not modified)."""
+    """Apply this run's alerts to GitHub and return the new state (the input is not modified).
+
+    Every rule is processed even if an earlier one fails. If any rule's API call fails, a
+    `SyncError` is raised after the loop; its `.state` holds the up-to-date state, including the
+    issue numbers created before and after the failure. The caller must save `exc.state` before
+    exiting non-zero, otherwise a retry would open duplicate issues.
+    """
     new = copy.deepcopy(state)
-    rules = new.setdefault("rules", {})
+    new.setdefault("rules", {})
     by_rule: dict[str, Alert] = {}
     for alert in alerts:
         if alert.rule not in RULES:
             raise ValueError(f"unknown alert rule: {_ident(alert.rule)}")
         by_rule.setdefault(alert.rule, alert)
 
-    if dry_run:
-        # Dry runs open or comment on their own issues and never close anything.
-        dry = new.setdefault("dry_run_issues", {})
-        for rule, alert in by_rule.items():
-            dry[rule] = _fire(
-                alert, dry.get(rule), gh, run_url=run_url, project_id=project_id, dry_run=True
-            )
-        return new
-
+    failures: list[tuple[str, GitHubError]] = []
     for rule in RULES:
-        entry = rules.setdefault(rule, {"issue": None, "clean_runs": 0})
-        alert = by_rule.get(rule)
-        if alert is not None:
-            entry["issue"] = _fire(
-                alert, entry.get("issue"), gh, run_url=run_url, project_id=project_id, dry_run=False
+        try:
+            _sync_rule(
+                rule,
+                by_rule.get(rule),
+                new,
+                gh,
+                run_url=run_url,
+                project_id=project_id,
+                dry_run=dry_run,
             )
-            entry["clean_runs"] = 0
-            continue
-        issue = entry.get("issue")
-        if issue is None:
-            entry["clean_runs"] = 0
-            continue
-        entry["clean_runs"] = entry.get("clean_runs", 0) + 1
-        if entry["clean_runs"] >= CLEAN_RUNS_TO_CLOSE:
-            if gh.is_open(issue):
-                gh.comment(
-                    issue,
-                    f"Alert recovered after {CLEAN_RUNS_TO_CLOSE} clean runs. Closing this issue.",
-                )
-                gh.close(issue)
-            entry["issue"] = None
-            entry["clean_runs"] = 0
+        except GitHubError as exc:
+            failures.append((rule, exc))
+    if failures:
+        names = ", ".join(f"{rule} ({type(exc).__name__})" for rule, exc in failures)
+        raise SyncError(f"GitHub sync failed for: {names}", new) from failures[0][1]
     return new
