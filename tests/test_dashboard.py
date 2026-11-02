@@ -512,3 +512,25 @@ def test_theme_can_be_overridden_by_attribute():
     # and each token is declared once in the light block
     names = [name for name, _ in tokens(light)]
     assert len(names) == len(set(names))
+
+
+def test_rule_copy_is_true_to_the_code(tmp_path):
+    from rail_rag_monitor import alerts
+
+    _, html = build(tmp_path)
+    assert "None of them alert" not in html
+    assert "no baseline" in html  # uptime needs none
+    assert f"{alerts.UPTIME_RUNS} consecutive runs" in html
+    assert f"{alerts.MIN_BASELINE_RUNS} baseline runs" in html
+    assert f"{alerts.LATENCY_FACTOR:g}&times;" in html
+    assert "daily probe only" in html and "never alerted" in html
+    assert "rules that watch both" not in html
+    assert "at least 3 failed questions of 24" in html
+    assert "never binds" in html
+    assert "no trace id" in html
+
+
+def test_delta_note_counts_noise_and_scheduled_runs(tmp_path):
+    _, html = build(tmp_path)
+    assert "noise and scheduled runs" in html
+    assert "from 12 noise runs" not in html

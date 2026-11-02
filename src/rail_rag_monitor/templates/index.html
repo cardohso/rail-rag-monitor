@@ -184,7 +184,7 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
 <body>
 <header class="wrap">
   <h1>Rail RAG monitor</h1>
-  <p class="sub">A daily synthetic probe of the rail RAG demo, a summary of its real traffic, and the alert rules that watch both.</p>
+  <p class="sub">A daily synthetic probe of the rail RAG demo, a summary of its real traffic, and alert rules. Alerts come from the daily probe only; real traffic is never alerted.</p>
 </header>
 
 <main class="wrap">
@@ -192,8 +192,9 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
     <h2 id="h-status">Status</h2>
     <div class="tiles" id="tiles"></div>
     <ul class="alerts" id="alert-list" aria-label="Alerts"></ul>
-    <p class="rule">The quality alert fires when the last __RECENT__ probe runs fail more often than the up to __BASELINE_MAX__ runs before them, with a one-sided Fisher exact test at p &lt; 0.01 and a fail-rate rise of at least <span class="delta">δ = __DELTA__</span> (__DELTA_NOTE__).</p>
-    <p class="note"><strong>Fisher&rsquo;s exact test (p &lt; 0.01) is the gate that decides;</strong> δ is a secondary margin that keeps a small, probably random rise from alerting. Two more rules run alongside: uptime (2 consecutive runs with an HTTP error) and latency (warm p95 above __LATENCY_FACTOR__&times; the baseline median on 2 consecutive runs). None of them alert until __MIN_BASELINE__ baseline runs exist.</p>
+    <p class="rule">The quality alert fires when the last __RECENT__ probe runs fail more often than the up to __BASELINE_MAX__ runs before them, with a one-sided Fisher exact test at p &lt; __ALPHA__ and a fail-rate rise of at least <span class="delta">δ = __DELTA__</span> (__DELTA_NOTE__).</p>
+    <p class="note"><strong>Fisher&rsquo;s exact test (p &lt; __ALPHA__) is the gate that decides.</strong> With these sample sizes the test already needs a rise of at least 3 failed questions of 24 (about 12.5 percentage points), so a δ at the 2-question floor never binds and a measured δ only matters above that.</p>
+    <p class="note">Two more rules run alongside. Uptime needs no baseline: it fires after __UPTIME_RUNS__ consecutive runs in which any question has a status other than ok (HTTP errors, timeouts, rate limits, unusable replies). Latency fires when warm p95 stays above __LATENCY_FACTOR__&times; the baseline median on __LATENCY_RUNS__ consecutive runs. Only the quality and latency rules wait for __MIN_BASELINE__ baseline runs.</p>
   </section>
 
   <section id="pass-rate" aria-labelledby="h-pass">
@@ -247,7 +248,7 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
 
   <section id="traffic" aria-labelledby="h-traffic">
     <h2 id="h-traffic">Real traffic <span class="badge">low volume: not alerted</span></h2>
-    <p class="lede">Daily summary of real requests to the demo, probe traffic excluded. Volumes are small, so no rule alerts on them; read the rates with each day&rsquo;s n in mind.</p>
+    <p class="lede">Daily summary of real requests to the demo, probe traffic excluded. Volumes are small, so no rule alerts on them; read the rates with each day&rsquo;s n in mind. When the demo is down, failed probe calls can also appear in the error counts, because the demo&rsquo;s error replies carry no trace id to exclude.</p>
     __TRAFFIC_EMPTY__
     <div class="charts two" id="traffic-charts" hidden>
       <div class="card">

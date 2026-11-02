@@ -24,8 +24,10 @@ from rail_rag_monitor.alerts import (
     CLEAN_RUNS_TO_CLOSE,
     DELTA_FLOOR,
     LATENCY_FACTOR,
+    LATENCY_RUNS,
     MIN_BASELINE_RUNS,
     RECENT_RUNS,
+    UPTIME_RUNS,
 )
 
 MAX_RUNS = 90  # the page plots the latest runs; the rules only look at 17
@@ -280,7 +282,7 @@ def build_site(
     clean_noise = _clean_noise(noise)
     delta = clean_noise["delta"] if clean_noise else DELTA_FLOOR
     delta_note = (
-        f"measured from {clean_noise['n_runs']} noise runs"
+        f"measured from {clean_noise['n_runs']} noise and scheduled runs"
         if clean_noise and clean_noise["n_runs"] is not None
         else "measured from probe noise"
         if clean_noise
@@ -311,6 +313,9 @@ def build_site(
         "MIN_BASELINE": str(MIN_BASELINE_RUNS),
         "RECENT": str(RECENT_RUNS),
         "BASELINE_MAX": str(BASELINE_MAX_RUNS),
+        "ALPHA": f"{ALPHA:g}",
+        "UPTIME_RUNS": str(UPTIME_RUNS),
+        "LATENCY_RUNS": str(LATENCY_RUNS),
         "LATENCY_FACTOR": f"{LATENCY_FACTOR:g}",
         "CLEAN_TO_CLOSE": str(CLEAN_RUNS_TO_CLOSE),
         "RUNS_EMPTY": _empty_note("no runs yet", bool(runs)),
