@@ -1,0 +1,5 @@
+[
+  {"id": "g1", "type": "GENERATION", "traceId": "t1", "name": "generate", "usageDetails": {}, "totalUsage": 0, "totalCost": null},
+  {"id": "g2", "type": "GENERATION", "traceId": "t2", "name": "generate", "usageDetails": {}, "totalUsage": 0, "totalCost": null},
+  {"id": "g3", "type": "GENERATION", "traceId": "t3", "name": "generate", "usageDetails": {}, "totalUsage": 0, "totalCost": null}
+]
