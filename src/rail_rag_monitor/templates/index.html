@@ -1,0 +1,813 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Rail RAG monitor</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --ink-3: #6b6a65;
+  --hairline: #e1e0d9;
+  --axis: #c3c2b7;
+  --ring: rgba(11, 11, 11, 0.10);
+  --s1: #2a78d6;
+  --s2: #eb6834;
+  --s3: #1baf7a;
+  --s4: #eda100;
+  --s5: #e87ba4;
+  --neutral-mark: #9a98a0;
+  --pass: #86b6ef;
+  --fail: #d03b3b;
+  --critical: #d03b3b;
+  --good-text: #006300;
+  --band: #898781;
+  --on-fill: #ffffff;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #f0efec;
+    --ink-2: #c3c2b7;
+    --ink-3: #a3a198;
+    --hairline: #2c2c2a;
+    --axis: #383835;
+    --ring: rgba(255, 255, 255, 0.10);
+    --s1: #3987e5;
+    --s2: #d95926;
+    --s3: #199e70;
+    --s4: #c98500;
+    --s5: #d55181;
+    --neutral-mark: #6b6a73;
+    --pass: #1c5cab;
+    --fail: #d03b3b;
+    --critical: #e66767;
+    --good-text: #0ca30c;
+    --band: #898781;
+  }
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font: 16px/1.5 var(--font);
+  overflow-wrap: anywhere;
+}
+a { color: inherit; text-underline-offset: 2px; }
+a:focus-visible, summary:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; border-radius: 2px; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
+
+header.wrap { padding-top: 32px; padding-bottom: 8px; }
+h1 { margin: 0 0 4px; font-size: 1.625rem; line-height: 1.2; font-weight: 650; letter-spacing: -0.01em; }
+.sub { margin: 0; color: var(--ink-2); max-width: 62ch; }
+
+section { margin-top: 40px; }
+h2 {
+  margin: 0 0 4px;
+  padding-top: 20px;
+  border-top: 1px solid var(--hairline);
+  font-size: 1.125rem;
+  line-height: 1.3;
+  font-weight: 650;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+}
+h3 { margin: 0; font-size: 0.9375rem; line-height: 1.35; font-weight: 600; }
+.lede { margin: 0 0 16px; color: var(--ink-2); max-width: 70ch; }
+.badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ink-2);
+  border: 1px solid var(--axis);
+  border-radius: 999px;
+  padding: 1px 10px;
+}
+.empty { margin: 8px 0 0; padding: 20px; color: var(--ink-2); border: 1px dashed var(--axis); border-radius: 8px; }
+.note { margin: 12px 0 0; color: var(--ink-2); font-size: 0.9375rem; max-width: 70ch; }
+.note strong { color: var(--ink); font-weight: 600; }
+.fine { color: var(--ink-3); font-size: 0.8125rem; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 12px 0 0; }
+.card {
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--ring);
+  border-radius: 10px;
+  padding: 14px 16px 12px;
+}
+.tile .label { margin: 0; color: var(--ink-2); font-size: 0.8125rem; }
+.tile .value { margin: 2px 0 0; font-size: 1.75rem; line-height: 1.2; font-weight: 600; }
+.tile .detail { margin: 4px 0 0; color: var(--ink-2); font-size: 0.8125rem; }
+
+.alerts { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 8px; }
+.alerts li { display: flex; gap: 10px; align-items: baseline; }
+.mark { flex: none; font-weight: 700; width: 1.2em; text-align: center; }
+.mark.ok { color: var(--good-text); }
+.mark.bad { color: var(--critical); }
+.mark.test { color: var(--ink-2); }
+
+.rule { margin: 20px 0 0; max-width: 70ch; }
+.rule .delta { font-weight: 650; white-space: nowrap; }
+
+.charts { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; margin-top: 12px; }
+@media (min-width: 780px) {
+  .charts.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.card .cap { margin: 2px 0 8px; color: var(--ink-2); font-size: 0.8125rem; }
+.chart { width: 100%; min-width: 0; min-height: 120px; }
+.chart .vega-embed { display: block; width: 100%; }
+.chart svg { max-width: 100%; }
+.chart-msg { margin: 0; padding: 24px 0; color: var(--ink-2); font-size: 0.875rem; }
+
+.key { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 8px 0 0; padding: 0; list-style: none; color: var(--ink-2); font-size: 0.8125rem; }
+.key li { display: inline-flex; align-items: center; gap: 6px; }
+.sw { display: inline-grid; place-items: center; width: 14px; height: 14px; border-radius: 3px; font-size: 10px; font-weight: 700; line-height: 1; }
+.sw.line { height: 2px; width: 16px; border-radius: 1px; }
+.sw.pass { background: var(--pass); }
+.sw.fail { background: var(--fail); color: var(--on-fill); }
+.sw.error { background: var(--ink-2); color: var(--surface); }
+.sw.none { background: var(--surface); box-shadow: inset 0 0 0 1px var(--axis); }
+.sw.band { background: var(--band); opacity: 0.3; }
+.sw.rule { background: var(--ink-2); height: 2px; width: 16px; }
+
+details { margin-top: 12px; }
+summary { cursor: pointer; color: var(--ink-2); font-size: 0.875rem; padding: 4px 0; }
+.tablewrap { overflow-x: auto; margin-top: 8px; border: 1px solid var(--hairline); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 0.8125rem; font-variant-numeric: tabular-nums; }
+th, td { padding: 6px 10px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--hairline); }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--ink-2); font-weight: 600; position: sticky; top: 0; background: var(--surface); }
+tr:last-child td { border-bottom: 0; }
+
+footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); font-size: 0.8125rem; }
+</style>
+</head>
+<body>
+<header class="wrap">
+  <h1>Rail RAG monitor</h1>
+  <p class="sub">A daily synthetic probe of the rail RAG demo, a summary of its real traffic, and the alert rules that watch both.</p>
+</header>
+
+<main class="wrap">
+  <section id="status" aria-labelledby="h-status">
+    <h2 id="h-status">Status</h2>
+    <div class="tiles" id="tiles"></div>
+    <ul class="alerts" id="alert-list" aria-label="Alerts"></ul>
+    <p class="rule">The quality alert fires when the last __RECENT__ probe runs fail more often than the up to __BASELINE_MAX__ runs before them, with a one-sided Fisher exact test at p &lt; 0.01 and a fail-rate rise of at least <span class="delta">δ = __DELTA__</span> (__DELTA_NOTE__).</p>
+    <p class="note"><strong>Fisher&rsquo;s exact test (p &lt; 0.01) is the gate that decides;</strong> δ is a secondary margin that keeps a small, probably random rise from alerting. Two more rules run alongside: uptime (2 consecutive runs with an HTTP error) and latency (warm p95 above __LATENCY_FACTOR__&times; the baseline median on 2 consecutive runs). None of them alert until __MIN_BASELINE__ baseline runs exist.</p>
+  </section>
+
+  <section id="pass-rate" aria-labelledby="h-pass">
+    <h2 id="h-pass">Probe pass rate</h2>
+    <p class="lede">Share of the probe questions that passed in each run. A question passes when an answerable one is answered with citations from the right document, or an unanswerable one is refused. HTTP errors are not quality failures.</p>
+    __RUNS_EMPTY__
+    <div class="card" id="pass-card" hidden>
+      <h3>Questions passing per run</h3>
+      <p class="cap" id="pass-cap"></p>
+      <div class="chart" id="chart-pass"></div>
+      <ul class="key" id="pass-key"></ul>
+    </div>
+  </section>
+
+  <section id="grid" aria-labelledby="h-grid">
+    <h2 id="h-grid">Question grid</h2>
+    <p class="lede">Each row is one probe question, each column one run, oldest on the left.</p>
+    __RUNS_EMPTY__
+    <div class="card" id="grid-card" hidden>
+      <div class="chart" id="chart-grid"></div>
+      <ul class="key">
+        <li><span class="sw pass"></span>passed</li>
+        <li><span class="sw fail">&#x2715;</span>failed</li>
+        <li><span class="sw error">!</span>HTTP error, not scored</li>
+        <li><span class="sw none"></span>no result</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="latency" aria-labelledby="h-latency">
+    <h2 id="h-latency">Latency</h2>
+    <p class="lede">Seconds per probe request. Warm requests are alerted; the cold start after the demo scales to zero is shown but not alerted.</p>
+    __RUNS_EMPTY__
+    <div class="charts two" id="latency-charts" hidden>
+      <div class="card">
+        <h3>Warm latency per run</h3>
+        <p class="cap" id="warm-cap"></p>
+        <div class="chart" id="chart-warm"></div>
+      </div>
+      <div class="card">
+        <h3>Cold-start latency per run</h3>
+        <p class="cap">First request of each run. Not alerted.</p>
+        <div class="chart" id="chart-cold"></div>
+      </div>
+    </div>
+    <details id="runs-table-wrap" hidden>
+      <summary>Table view: probe runs</summary>
+      <div class="tablewrap" id="table-runs"></div>
+    </details>
+  </section>
+
+  <section id="traffic" aria-labelledby="h-traffic">
+    <h2 id="h-traffic">Real traffic <span class="badge">low volume: not alerted</span></h2>
+    <p class="lede">Daily summary of real requests to the demo, probe traffic excluded. Volumes are small, so no rule alerts on them; read the rates with each day&rsquo;s n in mind.</p>
+    __TRAFFIC_EMPTY__
+    <div class="charts two" id="traffic-charts" hidden>
+      <div class="card">
+        <h3>Requests per day</h3>
+        <p class="cap">This is the n behind every rate below.</p>
+        <div class="chart" id="chart-requests"></div>
+      </div>
+      <div class="card">
+        <h3>Error rate</h3>
+        <p class="cap">Share of requests that ended in an error. Dot area is n requests.</p>
+        <div class="chart" id="chart-errors"></div>
+      </div>
+      <div class="card">
+        <h3>Refusals by reason</h3>
+        <p class="cap">Count of refused answers per day. n is the bar height.</p>
+        <div class="chart" id="chart-refusals"></div>
+      </div>
+      <div class="card">
+        <h3>Grounding-failure share</h3>
+        <p class="cap">Share of refusals that came after retrieval found passages. Dot area is n refusals.</p>
+        <div class="chart" id="chart-grounding"></div>
+      </div>
+      <div class="card">
+        <h3>Latency per day</h3>
+        <p class="cap">Median and 95th percentile of answered requests, in seconds.</p>
+        <div class="chart" id="chart-traffic-latency"></div>
+      </div>
+    </div>
+    <p class="note" id="usage-note">__USAGE_NOTE__</p>
+    <details id="traffic-table-wrap" hidden>
+      <summary>Table view: traffic days</summary>
+      <div class="tablewrap" id="table-traffic"></div>
+    </details>
+  </section>
+</main>
+
+<footer class="wrap">
+  <p>Source and method: <a href="https://github.com/__REPO__">__REPO__</a>. Only probe scores, timings and daily traffic aggregates are published here. No question, answer or citation text, and no trace links.</p>
+</footer>
+
+<script id="monitor-data" type="application/json">__DATA_JSON__</script>
+<script src="https://cdn.jsdelivr.net/npm/vega@5.33.0/build/vega.min.js" integrity="sha384-Kpi0LDGE2Pg6N3+B3LiVIugYJ3rGL3AAqlnkRLfFxZtmejptl+TJ3iKY54HF5U3l" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-lite@5.23.0/build/vega-lite.min.js" integrity="sha384-D9LYH0esGjcxQJsBuxOuXtCDJGXRWW1+KhluzWPqi0rLJmiR/ygPChefaD+rFFDQ" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-embed@6.29.0/build/vega-embed.min.js" integrity="sha384-M+Ax7e/WFJpxSOF09HzI+Sj4wg9ottVd/uxmV2ItGGh02fLH28t2FAOJx3TJBap5" crossorigin="anonymous"></script>
+<script>
+(function () {
+  "use strict";
+
+  // All data is written into the page with textContent / setAttribute, never as markup.
+  var DATA = JSON.parse(document.getElementById("monitor-data").textContent);
+  var P = DATA.params;
+  var REPO_URL = "https://github.com/" + DATA.repo;
+  var FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif';
+  var DASH = "–";
+
+  var runs = DATA.runs.slice().sort(function (a, b) { return a.started_at < b.started_at ? -1 : a.started_at > b.started_at ? 1 : 0; });
+  var days = DATA.traffic.slice().sort(function (a, b) { return a.day < b.day ? -1 : a.day > b.day ? 1 : 0; });
+
+  function $(id) { return document.getElementById(id); }
+  function el(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined && text !== null) node.textContent = text;
+    return node;
+  }
+  function show(id) { var n = $(id); if (n) n.hidden = false; }
+  function fmt(x, digits) { return x === null || x === undefined ? DASH : Number(x).toFixed(digits); }
+  function pctOf(num, den) { return num === null || den === null || !den ? null : (100 * num) / den; }
+  function dayLabel(iso) { return iso.slice(5, 10); }
+  function whenLabel(iso) { return iso.slice(0, 16).replace("T", " ") + " UTC"; }
+  function median(values) {
+    var s = values.slice().sort(function (a, b) { return a - b; });
+    var m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  }
+  function plural(n, word) { return n + " " + word + (n === 1 ? "" : "s"); }
+
+  // ---- baselines, mirroring the alert rules ------------------------------------------------
+  function passBaseline() {
+    var earlier = runs.slice(0, Math.max(0, runs.length - P.recent_runs)).filter(function (r) { return r.kind !== "dry-run"; });
+    var base = earlier.slice(-P.baseline_max_runs);
+    var scored = base.filter(function (r) { return r.n_scored; });
+    var out = { n: base.length, established: base.length >= P.min_baseline_runs && scored.length > 0 };
+    if (out.established) {
+      var pass = 0, tot = 0, rates = [];
+      scored.forEach(function (r) { pass += r.n_pass || 0; tot += r.n_scored; rates.push((100 * (r.n_pass || 0)) / r.n_scored); });
+      out.mean = (100 * pass) / tot;
+      out.lo = Math.min.apply(null, rates);
+      out.hi = Math.max.apply(null, rates);
+    }
+    return out;
+  }
+  function latencyBaseline() {
+    var earlier = runs.slice(0, Math.max(0, runs.length - P.recent_runs)).filter(function (r) { return r.kind !== "dry-run"; });
+    var vals = earlier.slice(-P.baseline_max_runs).map(function (r) { return r.warm_p95_s; }).filter(function (v) { return v !== null; });
+    if (vals.length < P.min_baseline_runs) return { established: false, n: vals.length };
+    var med = median(vals);
+    return { established: true, n: vals.length, median: med, threshold: P.latency_factor * med };
+  }
+
+  // ---- status -------------------------------------------------------------------------------
+  function tile(label, value, detail) {
+    var card = el("div", "card tile");
+    card.appendChild(el("p", "label", label));
+    card.appendChild(el("p", "value", value));
+    card.appendChild(el("p", "detail", detail));
+    return card;
+  }
+  function issueLink(n) {
+    var a = el("a", "", "#" + n);
+    a.setAttribute("href", REPO_URL + "/issues/" + n);
+    return a;
+  }
+  function renderStatus() {
+    var tiles = $("tiles");
+    var last = runs.length ? runs[runs.length - 1] : null;
+    if (last) {
+      var detail = [whenLabel(last.started_at), last.kind, last.demo_version ? "demo " + last.demo_version : null].filter(Boolean).join(" · ");
+      var score = last.n_scored ? last.n_pass + " of " + last.n_scored + " passed" : "no scored answers";
+      tiles.appendChild(tile("Last probe run", score, detail));
+    } else {
+      tiles.appendChild(tile("Last probe run", DASH, "nothing recorded"));
+    }
+    var open = DATA.alerts.open;
+    tiles.appendChild(tile("Open alerts", String(open.length), open.length ? "see the issues below" : "none"));
+    var base = passBaseline();
+    var realRuns = runs.filter(function (r) { return r.kind !== "dry-run"; }).length;
+    tiles.appendChild(tile(
+      "Baseline",
+      base.established ? "ready" : "not yet",
+      base.established
+        ? plural(base.n, "run") + " before the last " + P.recent_runs
+        : "needs " + P.min_baseline_runs + " runs before the last " + P.recent_runs + "; has " + Math.max(0, realRuns - P.recent_runs)
+    ));
+
+    var list = $("alert-list");
+    if (!open.length) {
+      var ok = el("li");
+      ok.appendChild(el("span", "mark ok", "✓"));
+      ok.appendChild(el("span", "", "No open alerts."));
+      list.appendChild(ok);
+    }
+    open.forEach(function (a) {
+      var li = el("li");
+      li.appendChild(el("span", "mark bad", "▲"));
+      var text = el("span");
+      text.appendChild(document.createTextNode("Open " + a.rule + " alert, issue "));
+      text.appendChild(issueLink(a.issue));
+      text.appendChild(document.createTextNode(". Recovers after " + P.clean_runs_to_close + " clean runs in a row (" + a.clean_runs + " so far)."));
+      li.appendChild(text);
+      list.appendChild(li);
+    });
+    DATA.alerts.dry_run.forEach(function (a) {
+      var li = el("li");
+      li.appendChild(el("span", "mark test", "○"));
+      var text = el("span");
+      text.appendChild(document.createTextNode("Dry-run test of the " + a.rule + " rule, issue "));
+      text.appendChild(issueLink(a.issue));
+      text.appendChild(document.createTextNode(". A planted regression, not a real alert."));
+      li.appendChild(text);
+      list.appendChild(li);
+    });
+  }
+
+  // ---- tables ---------------------------------------------------------------------------------
+  function table(headers, rows) {
+    var t = el("table");
+    var thead = el("thead"), hr = el("tr");
+    headers.forEach(function (h) { var th = el("th", "", h); th.setAttribute("scope", "col"); hr.appendChild(th); });
+    thead.appendChild(hr);
+    t.appendChild(thead);
+    var tbody = el("tbody");
+    rows.forEach(function (row) {
+      var tr = el("tr");
+      row.forEach(function (cell) { tr.appendChild(el("td", "", cell)); });
+      tbody.appendChild(tr);
+    });
+    t.appendChild(tbody);
+    return t;
+  }
+  function renderTables() {
+    if (runs.length) {
+      var rows = runs.slice().reverse().map(function (r) {
+        return [whenLabel(r.started_at), r.kind || DASH, r.n_scored === null ? DASH : r.n_pass + "/" + r.n_scored, r.n_errors === null ? DASH : String(r.n_errors),
+          fmt(r.warm_p50_s, 2), fmt(r.warm_p95_s, 2), fmt(r.cold_latency_s, 1), r.demo_version || DASH];
+      });
+      $("table-runs").appendChild(table(["Run", "Kind", "Passed", "Errors", "Warm p50 s", "Warm p95 s", "Cold s", "Demo version"], rows));
+      show("runs-table-wrap");
+    }
+    if (days.length) {
+      var drows = days.slice().reverse().map(function (d) {
+        var refused = sumReasons(d);
+        return [d.day, d.n_requests === null ? DASH : String(d.n_requests), d.n_errors === null ? DASH : String(d.n_errors),
+          d.refusal_rate === null ? DASH : fmt(100 * d.refusal_rate, 1) + "%", String(refused),
+          d.grounding_failure_share === null ? DASH : fmt(100 * d.grounding_failure_share, 0) + "%",
+          fmt(d.p50_s, 2), fmt(d.p95_s, 2), fmt(d.tokens_per_request, 0), fmt(d.cost_per_request, 4)];
+      });
+      $("table-traffic").appendChild(table(["Day (UTC)", "Requests", "Errors", "Refusal rate", "Refusals", "Grounding failures", "p50 s", "p95 s", "Tokens/request", "Cost/request"], drows));
+      show("traffic-table-wrap");
+    }
+  }
+  function sumReasons(d) {
+    var n = 0;
+    Object.keys(d.refusals_by_reason).forEach(function (k) { n += d.refusals_by_reason[k]; });
+    return n;
+  }
+
+  // ---- charts -----------------------------------------------------------------------------------
+  function tokens() {
+    var cs = getComputedStyle(document.documentElement);
+    function v(name) { return cs.getPropertyValue(name).trim(); }
+    return {
+      dark: window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches,
+      surface: v("--surface"), ink: v("--ink"), ink2: v("--ink-2"), grid: v("--hairline"), axis: v("--axis"),
+      s: [v("--s1"), v("--s2"), v("--s3"), v("--s4"), v("--s5")],
+      neutral: v("--neutral-mark"), pass: v("--pass"), fail: v("--fail"), band: v("--band"), onFill: v("--on-fill")
+    };
+  }
+  function baseConfig(c) {
+    return {
+      background: "transparent",
+      font: FONT,
+      view: { stroke: null },
+      axis: {
+        labelColor: c.ink2, titleColor: c.ink2, domainColor: c.axis, tickColor: c.axis, gridColor: c.grid, gridWidth: 1,
+        labelFontSize: 11, titleFontSize: 12, titleFontWeight: 400, titlePadding: 10, labelPadding: 4, tickSize: 4
+      },
+      axisX: { grid: false },
+      legend: {
+        orient: "top", direction: "horizontal", labelColor: c.ink2, titleColor: c.ink2, labelFontSize: 12, titleFontSize: 12,
+        titleFontWeight: 400, symbolSize: 90, padding: 0, offset: 10, columnPadding: 14
+      },
+      line: { strokeWidth: 2, strokeJoin: "round", strokeCap: "round" },
+      text: { font: FONT, color: c.ink2, fontSize: 11 }
+    };
+  }
+  function message(host, text) {
+    host.replaceChildren(el("p", "chart-msg", text));
+  }
+  function draw(id, spec, description) {
+    var host = $(id);
+    if (!host) return;
+    if (typeof vegaEmbed === "undefined") {
+      message(host, "The chart library could not be loaded. The table view has the same data.");
+      return;
+    }
+    var c = tokens();
+    var full = Object.assign({
+      $schema: "https://vega.github.io/schema/vega-lite/v5.json",
+      width: "container",
+      autosize: { type: "fit", contains: "padding" },
+      config: baseConfig(c),
+      description: description
+    }, spec);
+    host.setAttribute("role", "img");
+    host.setAttribute("aria-label", description);
+    vegaEmbed(host, full, { actions: false, renderer: "svg", tooltip: { theme: c.dark ? "dark" : "light" } }).catch(function () {
+      message(host, "This chart could not be drawn. The table view has the same data.");
+    });
+  }
+
+  function runAxis(list, title) {
+    return {
+      field: "i", type: "ordinal", title: title,
+      axis: { labelAngle: 0, labelOverlap: "greedy", labelSeparation: 6, labelExpr: JSON.stringify(list.map(function (r) { return dayLabel(r.started_at); })) + "[datum.value]" }
+    };
+  }
+  var RUN_AXIS_TITLE = "Run date (UTC, MM-DD), oldest to newest";
+
+  function passChart(c) {
+    var base = passBaseline();
+    var rows = runs.map(function (r, i) {
+      return { i: i, when: whenLabel(r.started_at), kind: r.kind || "", rate: pctOf(r.n_pass, r.n_scored), passed: r.n_pass, scored: r.n_scored };
+    }).filter(function (r) { return r.rate !== null; });
+    var layers = [];
+    if (base.established) {
+      layers.push({
+        data: { values: [{ lo: base.lo, hi: base.hi }] },
+        mark: { type: "rect", color: c.band, opacity: 0.22 },
+        encoding: { y: { field: "lo", type: "quantitative" }, y2: { field: "hi" } }
+      });
+      layers.push({
+        data: { values: [{ mean: base.mean }] },
+        mark: { type: "rule", color: c.ink2, strokeWidth: 1 },
+        encoding: { y: { field: "mean", type: "quantitative" } }
+      });
+      layers.push({
+        data: { values: [{ mean: base.mean, label: "baseline " + Math.round(base.mean) + "%" }] },
+        mark: { type: "text", align: "left", baseline: "middle", color: c.ink2, fontSize: 11 },
+        encoding: { x: { value: { expr: "width + 8" } }, y: { field: "mean", type: "quantitative" }, text: { field: "label" } }
+      });
+    }
+    layers.push({
+      data: { values: rows },
+      mark: { type: "line", color: c.s[0], point: { filled: true, size: 70, color: c.s[0], stroke: c.surface, strokeWidth: 2 } },
+      encoding: {
+        x: runAxis(runs, RUN_AXIS_TITLE),
+        y: { field: "rate", type: "quantitative", scale: { domain: [0, 100] }, axis: { title: "Questions passing (%)", tickCount: 5, format: "d" } },
+        tooltip: [
+          { field: "when", title: "Run" }, { field: "kind", title: "Kind" },
+          { field: "passed", title: "Passed" }, { field: "scored", title: "Scored" },
+          { field: "rate", title: "Pass rate (%)", format: ".0f" }
+        ]
+      }
+    });
+    return { height: 230, padding: { left: 4, top: 8, bottom: 4, right: base.established ? 84 : 12 }, layer: layers };
+  }
+
+  function gridChart(c) {
+    var qids = {};
+    runs.forEach(function (r) { Object.keys(r.results).forEach(function (q) { qids[q] = true; }); });
+    var order = Object.keys(qids).sort();
+    var cells = [];
+    runs.forEach(function (r, i) {
+      order.forEach(function (q) {
+        var res = r.results[q];
+        var state = !res ? "no result" : res.status && res.status !== "ok" ? "error" : res.pass === true ? "pass" : res.pass === false ? "fail" : "no result";
+        cells.push({ i: i, q: q, state: state, when: whenLabel(r.started_at), status: res && res.status ? res.status : DASH, glyph: state === "fail" ? "✕" : state === "error" ? "!" : "" });
+      });
+    });
+    var hostWidth = $("chart-grid").clientWidth || 340;
+    var cellWidth = (hostWidth - 60) / Math.max(1, runs.length);
+    var layers = [{
+      mark: { type: "rect", stroke: c.surface, strokeWidth: 2, cornerRadius: 3 },
+      encoding: {
+        color: {
+          field: "state", type: "nominal", legend: null,
+          scale: { domain: ["pass", "fail", "error", "no result"], range: [c.pass, c.fail, c.ink2, c.surface] }
+        },
+        tooltip: [{ field: "q", title: "Question" }, { field: "when", title: "Run" }, { field: "state", title: "Result" }, { field: "status", title: "Status" }]
+      }
+    }];
+    if (cellWidth >= 14) {
+      layers.push({
+        transform: [{ filter: "datum.glyph != ''" }],
+        mark: { type: "text", fontSize: 11, fontWeight: 700 },
+        encoding: {
+          text: { field: "glyph" },
+          color: { condition: { test: "datum.state == 'fail'", value: c.onFill }, value: c.surface }
+        }
+      });
+    }
+    return {
+      height: Math.max(120, order.length * 24 + 56),
+      padding: { left: 4, top: 4, bottom: 4, right: 12 },
+      data: { values: cells },
+      encoding: {
+        x: runAxis(runs, RUN_AXIS_TITLE),
+        y: { field: "q", type: "ordinal", sort: order, title: null, axis: { domain: false, ticks: false } }
+      },
+      layer: layers
+    };
+  }
+
+  function lineEndLabel(rows, c) {
+    return {
+      data: { values: rows },
+      mark: { type: "text", align: "left", baseline: "middle", dx: 8, color: c.ink2, fontSize: 11 },
+      encoding: { x: { field: "i", type: "ordinal" }, y: { field: "value", type: "quantitative" }, text: { field: "series" } }
+    };
+  }
+  function dotLine(rows, seriesScale, xEnc, yTitle, tooltip) {
+    return {
+      data: { values: rows },
+      mark: { type: "line", point: { filled: true, size: 64, stroke: "transparent" } },
+      encoding: {
+        x: xEnc,
+        y: { field: "value", type: "quantitative", scale: { zero: true }, axis: { title: yTitle } },
+        color: { field: "series", type: "nominal", scale: seriesScale, legend: { title: null } },
+        tooltip: tooltip
+      }
+    };
+  }
+
+  function warmChart(c) {
+    var lb = latencyBaseline();
+    var rows = [], ends = [];
+    runs.forEach(function (r, i) {
+      if (r.warm_p50_s !== null) rows.push({ i: i, series: "p50", value: r.warm_p50_s, when: whenLabel(r.started_at) });
+      if (r.warm_p95_s !== null) rows.push({ i: i, series: "p95", value: r.warm_p95_s, when: whenLabel(r.started_at) });
+    });
+    ["p50", "p95"].forEach(function (s) {
+      var mine = rows.filter(function (r) { return r.series === s; });
+      if (mine.length) ends.push(mine[mine.length - 1]);
+    });
+    var layers = [];
+    if (lb.established) {
+      layers.push({
+        data: { values: [{ t: lb.threshold }] },
+        mark: { type: "rule", color: c.ink2, strokeWidth: 1 },
+        encoding: { y: { field: "t", type: "quantitative" } }
+      });
+      layers.push({
+        data: { values: [{ t: lb.threshold, label: "alert above " + lb.threshold.toFixed(1) + " s" }] },
+        mark: { type: "text", align: "left", baseline: "bottom", dx: 6, dy: -3, color: c.ink2, fontSize: 11 },
+        encoding: { x: { value: 0 }, y: { field: "t", type: "quantitative" }, text: { field: "label" } }
+      });
+    }
+    var x = runAxis(runs, RUN_AXIS_TITLE);
+    layers.push(dotLine(rows, { domain: ["p50", "p95"], range: [c.s[0], c.s[1]] }, x, "Warm latency (seconds)",
+      [{ field: "when", title: "Run" }, { field: "series", title: "Percentile" }, { field: "value", title: "Seconds", format: ".2f" }]));
+    layers.push(lineEndLabel(ends, c));
+    return { height: 230, padding: { left: 4, top: 8, bottom: 4, right: 36 }, layer: layers };
+  }
+
+  function coldChart(c) {
+    var rows = [];
+    runs.forEach(function (r, i) {
+      if (r.cold_latency_s !== null) rows.push({ i: i, value: r.cold_latency_s, when: whenLabel(r.started_at) });
+    });
+    return {
+      height: 230,
+      padding: { left: 4, top: 8, bottom: 4, right: 12 },
+      data: { values: rows },
+      mark: { type: "line", color: c.s[2], point: { filled: true, size: 64, color: c.s[2], stroke: c.surface, strokeWidth: 2 } },
+      encoding: {
+        x: runAxis(runs, RUN_AXIS_TITLE),
+        y: { field: "value", type: "quantitative", scale: { zero: true }, axis: { title: "Cold-start latency (seconds)" } },
+        tooltip: [{ field: "when", title: "Run" }, { field: "value", title: "Seconds", format: ".1f" }]
+      }
+    };
+  }
+
+  function dayAxis(title) {
+    return {
+      field: "day", type: "ordinal", sort: days.map(function (d) { return d.day; }), title: title || "Day (UTC, MM-DD)",
+      axis: { labelAngle: 0, labelOverlap: "greedy", labelSeparation: 6, labelExpr: "slice(datum.value, 5)" }
+    };
+  }
+
+  function requestsChart(c) {
+    var rows = days.filter(function (d) { return d.n_requests !== null; }).map(function (d) { return { day: d.day, n: d.n_requests }; });
+    return {
+      height: 190, padding: { left: 4, top: 8, bottom: 4, right: 12 },
+      data: { values: rows },
+      mark: { type: "bar", color: c.neutral, width: { band: 0.5 }, cornerRadiusEnd: 4 },
+      encoding: {
+        x: dayAxis(),
+        y: { field: "n", type: "quantitative", axis: { title: "Requests (n)", tickMinStep: 1, format: "d" } },
+        tooltip: [{ field: "day", title: "Day" }, { field: "n", title: "Requests (n)" }]
+      }
+    };
+  }
+
+  function sizedDots(rows, color, yTitle, sizeTitle, c, tooltip) {
+    return {
+      height: 190, padding: { left: 4, top: 8, bottom: 4, right: 12 },
+      data: { values: rows },
+      mark: { type: "point", filled: true, color: color, opacity: 1, stroke: c.surface, strokeWidth: 2 },
+      encoding: {
+        x: dayAxis(),
+        y: { field: "rate", type: "quantitative", scale: { domain: [0, 100] }, axis: { title: yTitle, tickCount: 5, format: "d" } },
+        size: { field: "n", type: "quantitative", scale: { type: "sqrt", range: [70, 420], zero: true }, legend: { title: sizeTitle, format: "d", symbolType: "circle", symbolFillColor: c.neutral, symbolStrokeColor: c.surface } },
+        tooltip: tooltip
+      }
+    };
+  }
+  function errorsChart(c) {
+    var rows = days.filter(function (d) { return d.n_requests; }).map(function (d) {
+      return { day: d.day, rate: pctOf(d.n_errors, d.n_requests), n: d.n_requests, errors: d.n_errors };
+    });
+    return sizedDots(rows, c.s[1], "Error rate (% of requests)", "n requests", c,
+      [{ field: "day", title: "Day" }, { field: "errors", title: "Errors" }, { field: "n", title: "Requests (n)" }, { field: "rate", title: "Error rate (%)", format: ".1f" }]);
+  }
+  function groundingChart(c) {
+    var rows = days.filter(function (d) { return d.grounding_failure_share !== null && sumReasons(d) > 0; }).map(function (d) {
+      return { day: d.day, rate: 100 * d.grounding_failure_share, n: sumReasons(d) };
+    });
+    return sizedDots(rows, c.s[2], "Grounding failures (% of refusals)", "n refusals", c,
+      [{ field: "day", title: "Day" }, { field: "n", title: "Refusals (n)" }, { field: "rate", title: "Grounding-failure share (%)", format: ".0f" }]);
+  }
+
+  var REASON_LABELS = [
+    ["low_retrieval_score", "low retrieval score"], ["no_relevant_passages", "no relevant passages"],
+    ["insufficient_context", "insufficient context"], ["no_citations", "no citations"], ["other", "other or unknown"]
+  ];
+  function refusalsChart(c) {
+    var rows = [];
+    days.forEach(function (d) {
+      REASON_LABELS.forEach(function (pair) {
+        var n = d.refusals_by_reason[pair[0]] || 0;
+        if (pair[0] === "other") n += d.refusals_by_reason.unknown || 0;
+        rows.push({ day: d.day, reason: pair[1], n: n });
+      });
+    });
+    return {
+      height: 190, padding: { left: 4, top: 8, bottom: 4, right: 12 },
+      data: { values: rows },
+      mark: { type: "bar", width: { band: 0.5 }, stroke: c.surface, strokeWidth: 2 },
+      encoding: {
+        x: dayAxis(),
+        y: { field: "n", type: "quantitative", aggregate: "sum", axis: { title: "Refusals (n)", tickMinStep: 1, format: "d" } },
+        color: { field: "reason", type: "nominal", scale: { domain: REASON_LABELS.map(function (p) { return p[1]; }), range: c.s }, legend: { title: null, columns: 2 } },
+        order: { field: "reason", sort: "descending" },
+        tooltip: [{ field: "day", title: "Day" }, { field: "reason", title: "Reason" }, { field: "n", title: "Refusals (n)" }]
+      }
+    };
+  }
+
+  function trafficLatencyChart(c) {
+    var rows = [], ends = [];
+    days.forEach(function (d, i) {
+      if (d.p50_s !== null) rows.push({ day: d.day, i: i, series: "p50", value: d.p50_s, n: d.n_requests });
+      if (d.p95_s !== null) rows.push({ day: d.day, i: i, series: "p95", value: d.p95_s, n: d.n_requests });
+    });
+    ["p50", "p95"].forEach(function (s) {
+      var mine = rows.filter(function (r) { return r.series === s; });
+      if (mine.length) ends.push(mine[mine.length - 1]);
+    });
+    var x = dayAxis();
+    var line = dotLine(rows, { domain: ["p50", "p95"], range: [c.s[0], c.s[1]] }, x, "Latency (seconds)",
+      [{ field: "day", title: "Day" }, { field: "series", title: "Percentile" }, { field: "value", title: "Seconds", format: ".2f" }, { field: "n", title: "Requests (n)" }]);
+    var label = lineEndLabel(ends, c);
+    label.encoding.x = x;
+    return { height: 190, padding: { left: 4, top: 8, bottom: 4, right: 36 }, layer: [line, label] };
+  }
+
+  function renderCharts() {
+    var c = tokens();
+    if (runs.length) {
+      show("pass-card"); show("grid-card"); show("latency-charts");
+      draw("chart-pass", passChart(c), "Line chart of the share of probe questions passing in each run, with the baseline mean and range.");
+      draw("chart-grid", gridChart(c), "Grid of probe questions by run showing which passed, failed or ended in an HTTP error.");
+      draw("chart-warm", warmChart(c), "Line chart of warm p50 and p95 latency per probe run, in seconds.");
+      draw("chart-cold", coldChart(c), "Line chart of cold-start latency per probe run, in seconds.");
+    }
+    if (days.length) {
+      show("traffic-charts");
+      draw("chart-requests", requestsChart(c), "Bar chart of real requests per day.");
+      draw("chart-errors", errorsChart(c), "Dot chart of the daily error rate; dot area is the number of requests.");
+      var totalRefusals = days.reduce(function (s, d) { return s + sumReasons(d); }, 0);
+      if (totalRefusals) draw("chart-refusals", refusalsChart(c), "Stacked bar chart of refusals per day by reason.");
+      else message($("chart-refusals"), "No refusals in this period.");
+      var anyGrounding = days.some(function (d) { return d.grounding_failure_share !== null && sumReasons(d) > 0; });
+      if (anyGrounding) draw("chart-grounding", groundingChart(c), "Dot chart of the daily share of refusals that were grounding failures; dot area is the number of refusals.");
+      else message($("chart-grounding"), "No refusals in this period.");
+      draw("chart-traffic-latency", trafficLatencyChart(c), "Line chart of median and 95th percentile latency of real requests per day, in seconds.");
+    }
+  }
+
+  function renderCaptions() {
+    var base = passBaseline();
+    var key = $("pass-key");
+    key.appendChild(keyItem("line", "var(--s1)", "pass rate per run"));
+    if (base.established) {
+      key.appendChild(keyItem("rule", null, "baseline mean (pooled over " + plural(base.n, "run") + " before the last " + P.recent_runs + ")"));
+      key.appendChild(keyItem("band", null, "baseline range: lowest to highest single run"));
+      $("pass-cap").textContent = "The last " + P.recent_runs + " runs are compared with the baseline. Baseline: " + Math.round(base.lo) + "% to " + Math.round(base.hi) + "%, mean " + Math.round(base.mean) + "%.";
+    } else {
+      $("pass-cap").textContent = "No baseline band yet: it needs " + P.min_baseline_runs + " non-dry runs before the last " + P.recent_runs + ".";
+    }
+    var lb = latencyBaseline();
+    $("warm-cap").textContent = lb.established
+      ? "Alert when warm p95 stays above " + P.latency_factor + "× the baseline median (" + lb.median.toFixed(2) + " s) for 2 runs."
+      : "No alert line yet: the latency baseline needs " + P.min_baseline_runs + " runs.";
+  }
+  function keyItem(kind, color, text) {
+    var li = el("li");
+    var sw = el("span", "sw " + kind);
+    if (color) sw.style.background = color;
+    li.appendChild(sw);
+    li.appendChild(document.createTextNode(text));
+    return li;
+  }
+
+  renderStatus();
+  renderCaptions();
+  renderTables();
+  renderCharts();
+
+  // Redraw when the colour scheme changes or the layout width changes.
+  var lastWidth = document.documentElement.clientWidth;
+  var timer = null;
+  function redraw() { renderCharts(); }
+  if (window.matchMedia) {
+    var mq = window.matchMedia("(prefers-color-scheme: dark)");
+    if (mq.addEventListener) mq.addEventListener("change", redraw);
+  }
+  window.addEventListener("resize", function () {
+    var w = document.documentElement.clientWidth;
+    if (w === lastWidth) return;
+    lastWidth = w;
+    clearTimeout(timer);
+    timer = setTimeout(redraw, 150);
+  });
+})();
+</script>
+</body>
+</html>
