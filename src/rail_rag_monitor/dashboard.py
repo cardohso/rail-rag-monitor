@@ -1,8 +1,9 @@
 """Static dashboard (spec section 8): one self-contained `index.html` with the data embedded.
 
 Privacy: everything that reaches the page goes through an allow-list. Each stored row is rebuilt
-from named fields only, with each value type-checked, so an unexpected key (answer text, a
-question, a trace id, free text) is dropped rather than published. Per-question trace ids are
+from named fields only, and every value is checked by type and, for strings, by value (a closed
+set or a strict pattern), so an unexpected key or a free-text value (answer text, a question, a
+trace id) is dropped rather than published. Per-question trace ids are
 never embedded: they would be public links to private traces. The JSON is escaped for a
 `<script>` element and the page script writes data into the DOM with `textContent` only.
 """
@@ -13,6 +14,7 @@ import html
 import json
 import math
 import re
+from datetime import date, datetime
 from importlib import resources
 from pathlib import Path
 
@@ -28,7 +30,6 @@ from rail_rag_monitor.alerts import (
 
 MAX_RUNS = 90  # the page plots the latest runs; the rules only look at 17
 MAX_TRAFFIC_DAYS = 90
-MAX_TEXT = 64
 
 REFUSAL_REASONS = (
     "low_retrieval_score",
@@ -43,6 +44,14 @@ ALERT_RULES = ("uptime", "quality", "latency")
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _QUESTION_ID = re.compile(r"[A-Za-z0-9_.-]{1,16}")
 _PLACEHOLDER = re.compile(r"__([A-Z_]+)__")
+_RUN_ID = re.compile(r"[A-Za-z0-9._:-]{1,100}")
+_DEMO_VERSION = re.compile(r"[A-Za-z0-9._+-]{1,40}")
+_STATUS = re.compile(r"ok|http_[0-9]{3}|timeout|connection|rate_limited|bad_response")
+_DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_TIMESTAMP = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|\+00:00)"
+)
+RUN_KINDS = frozenset({"scheduled", "manual", "noise", "dry-run"})
 
 RUN_NUMBERS = ("n_pass", "n_scored", "n_errors")
 RUN_LATENCIES = ("warm_p50_s", "warm_p95_s", "cold_latency_s")
@@ -69,8 +78,38 @@ def _count(value: object) -> int | None:
     return value
 
 
-def _text(value: object) -> str | None:
-    return value[:MAX_TEXT] if isinstance(value, str) else None
+def _matching(pattern: re.Pattern[str], value: object) -> str | None:
+    """The string itself when it fullmatches `pattern`, else None: never a transformed value."""
+    return value if isinstance(value, str) and pattern.fullmatch(value) else None
+
+
+def _status(value: object) -> str | None:
+    return _matching(_STATUS, value)
+
+
+def _kind(value: object) -> str | None:
+    return value if isinstance(value, str) and value in RUN_KINDS else None
+
+
+def _timestamp(value: object) -> str | None:
+    """An ISO-8601 UTC timestamp that is also a real instant."""
+    if _matching(_TIMESTAMP, value) is None:
+        return None
+    try:
+        datetime.fromisoformat(value)  # type: ignore[arg-type]
+    except ValueError:
+        return None
+    return value  # type: ignore[return-value]
+
+
+def _day(value: object) -> str | None:
+    if _matching(_DAY, value) is None:
+        return None
+    try:
+        date.fromisoformat(value)  # type: ignore[arg-type]
+    except ValueError:
+        return None
+    return value  # type: ignore[return-value]
 
 
 def _boolean(value: object) -> bool | None:
@@ -86,7 +125,7 @@ def _clean_result(result: object) -> dict:
     result = result if isinstance(result, dict) else {}
     return {
         "pass": _boolean(result.get("pass")),
-        "status": _text(result.get("status")),
+        "status": _status(result.get("status")),
         "latency_s": _number(result.get("latency_s")),
         "cold": _boolean(result.get("cold")) or False,
     }
@@ -95,7 +134,8 @@ def _clean_result(result: object) -> dict:
 def _clean_run(row: object) -> dict | None:
     if not isinstance(row, dict):
         return None
-    run_id, started_at = _text(row.get("run_id")), _text(row.get("started_at"))
+    run_id = _matching(_RUN_ID, row.get("run_id"))
+    started_at = _timestamp(row.get("started_at"))
     if not run_id or not started_at:
         return None
     results = row.get("results")
@@ -103,8 +143,8 @@ def _clean_run(row: object) -> dict | None:
     clean = {
         "run_id": run_id,
         "started_at": started_at,
-        "kind": _text(row.get("kind")),
-        "demo_version": _text(row.get("demo_version")),
+        "kind": _kind(row.get("kind")),
+        "demo_version": _matching(_DEMO_VERSION, row.get("demo_version")),
         "results": {
             qid: _clean_result(res)
             for qid, res in results.items()
@@ -121,7 +161,7 @@ def _clean_run(row: object) -> dict | None:
 def _clean_day(row: object) -> dict | None:
     if not isinstance(row, dict):
         return None
-    day = _text(row.get("day"))
+    day = _day(row.get("day"))
     if not day:
         return None
     reasons = row.get("refusals_by_reason")
@@ -181,7 +221,7 @@ def _clean_noise(noise: object) -> dict | None:
         "n_runs": _count(noise.get("n_runs")),
         "pass_rates": per_question(noise.get("pass_rates"), _number),
         "flips": per_question(noise.get("flips"), _count),
-        "computed_at": _text(noise.get("computed_at")),
+        "computed_at": _timestamp(noise.get("computed_at")),
     }
 
 
@@ -192,8 +232,8 @@ def _embed_json(payload: dict) -> str:
         ("<", "\\u003c"),
         (">", "\\u003e"),
         ("&", "\\u0026"),
-        (" ", "\\u2028"),
-        (" ", "\\u2029"),
+        ("\u2028", "\\u2028"),
+        ("\u2029", "\\u2029"),
     ):
         text = text.replace(raw, escaped)
     return text
@@ -228,8 +268,15 @@ def build_site(
     if not _REPO.fullmatch(repo):
         raise ValueError(f"repo must look like 'owner/name', got {repo!r}")
 
-    runs = [r for r in map(_clean_run, probe_runs) if r][-MAX_RUNS:]
-    days = [d for d in map(_clean_day, traffic_days) if d][-MAX_TRAFFIC_DAYS:]
+    # Oldest first, then keep the latest: the stored order is not trusted to be chronological.
+    # The sort is stable, so rows with the same instant keep their stored order.
+    runs = sorted(
+        (r for r in map(_clean_run, probe_runs) if r),
+        key=lambda r: datetime.fromisoformat(r["started_at"]),
+    )[-MAX_RUNS:]
+    days = sorted((d for d in map(_clean_day, traffic_days) if d), key=lambda d: d["day"])[
+        -MAX_TRAFFIC_DAYS:
+    ]
     clean_noise = _clean_noise(noise)
     delta = clean_noise["delta"] if clean_noise else DELTA_FLOOR
     delta_note = (

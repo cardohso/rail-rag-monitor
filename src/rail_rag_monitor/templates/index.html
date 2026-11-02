@@ -30,8 +30,11 @@
   --on-fill: #ffffff;
   --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
 }
+/* Dark tokens: used when the OS asks for dark unless the page is forced light, and when forced
+   dark by data-theme="dark". The two lists must stay identical (a test compares them). */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
     --page: #0d0d0d;
     --surface: #1a1a19;
     --ink: #f0efec;
@@ -53,6 +56,29 @@
     --band: #898781;
   }
 }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --ink: #f0efec;
+  --ink-2: #c3c2b7;
+  --ink-3: #a3a198;
+  --hairline: #2c2c2a;
+  --axis: #383835;
+  --ring: rgba(255, 255, 255, 0.10);
+  --s1: #3987e5;
+  --s2: #d95926;
+  --s3: #199e70;
+  --s4: #c98500;
+  --s5: #d55181;
+  --neutral-mark: #6b6a73;
+  --pass: #1c5cab;
+  --fail: #d03b3b;
+  --critical: #e66767;
+  --good-text: #0ca30c;
+  --band: #898781;
+}
+:root[data-theme="light"] { color-scheme: light; }
 
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
@@ -340,7 +366,7 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
     var last = runs.length ? runs[runs.length - 1] : null;
     if (last) {
       var detail = [whenLabel(last.started_at), last.kind, last.demo_version ? "demo " + last.demo_version : null].filter(Boolean).join(" · ");
-      var score = last.n_scored ? last.n_pass + " of " + last.n_scored + " passed" : "no scored answers";
+      var score = last.n_pass === null ? "no result" : last.n_scored ? last.n_pass + " of " + last.n_scored + " passed" : "no scored answers";
       tiles.appendChild(tile("Last probe run", score, detail));
     } else {
       tiles.appendChild(tile("Last probe run", DASH, "nothing recorded"));
@@ -430,11 +456,16 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
   }
 
   // ---- charts -----------------------------------------------------------------------------------
+  function themeIsDark() {
+    var forced = document.documentElement.getAttribute("data-theme");
+    if (forced === "dark" || forced === "light") return forced === "dark";
+    return !!(window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+  }
   function tokens() {
     var cs = getComputedStyle(document.documentElement);
     function v(name) { return cs.getPropertyValue(name).trim(); }
     return {
-      dark: window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches,
+      dark: themeIsDark(),
       surface: v("--surface"), ink: v("--ink"), ink2: v("--ink-2"), grid: v("--hairline"), axis: v("--axis"),
       s: [v("--s1"), v("--s2"), v("--s3"), v("--s4"), v("--s5")],
       neutral: v("--neutral-mark"), pass: v("--pass"), fail: v("--fail"), band: v("--band"), onFill: v("--on-fill")
@@ -491,7 +522,7 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
   }
   var RUN_AXIS_TITLE = "Run date (UTC, MM-DD)";
   // End-of-line labels need a right margin: only draw them when the card is wide enough.
-  var NARROW_PX = 520;
+  var NARROW_PX = 440;
   function isNarrow(id) { return ($(id).clientWidth || 0) < NARROW_PX; }
 
   function passChart(c) {
@@ -667,6 +698,7 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
 
   function legendValues(rows) {
     var ns = rows.map(function (r) { return r.n; });
+    if (!ns.length) return [];
     var lo = Math.min.apply(null, ns), hi = Math.max.apply(null, ns);
     var mid = Math.round((lo + hi) / 2);
     var out = [lo];
@@ -675,6 +707,7 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
     return out;
   }
   function sizedDots(rows, color, yTitle, sizeTitle, c, tooltip) {
+    var legendVals = legendValues(rows);
     return {
       height: 220, padding: { left: 4, top: 8, bottom: 4, right: 12 },
       data: { values: rows },
@@ -682,7 +715,7 @@ footer.wrap { margin: 48px auto 40px; padding-top: 16px; color: var(--ink-3); fo
       encoding: {
         x: dayAxis(),
         y: { field: "rate", type: "quantitative", scale: { domain: [0, 100] }, axis: { title: yTitle, tickCount: 5, format: "d" } },
-        size: { field: "n", type: "quantitative", scale: { type: "sqrt", range: [70, 320], zero: true }, legend: { title: sizeTitle, values: legendValues(rows), columns: 4, titleLimit: 90, format: "d", symbolType: "circle", symbolFillColor: c.neutral, symbolStrokeColor: c.surface } },
+        size: { field: "n", type: "quantitative", scale: { type: "sqrt", range: [70, 320], zero: true }, legend: legendVals.length ? { title: sizeTitle, values: legendVals, columns: 4, titleLimit: 90, format: "d", symbolType: "circle", symbolFillColor: c.neutral, symbolStrokeColor: c.surface } : null },
         tooltip: tooltip
       }
     };
