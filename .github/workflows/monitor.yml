@@ -31,7 +31,12 @@ env:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Timeouts: one probe run against a demo that accepts connections but never answers takes
+    # about 21.5 min (120 s timeout per question, the cold first one tried twice, 13 s pacing).
+    # The probe step gets 25 min so a hung demo is recorded as a step failure while the later
+    # steps still run (data commit, site, final gate). The job gets 45 min: 25 for the probe
+    # plus margin for setup, collect with Langfuse retries, alerts and the Pages deploy.
+    timeout-minutes: 45
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -70,6 +75,7 @@ jobs:
         id: probe
         if: ${{ !inputs.plant_regression }}
         continue-on-error: true
+        timeout-minutes: 25
         env:
           EVENT_NAME: ${{ github.event_name }}
           NOISE_RUNS: ${{ inputs.noise_runs }}
@@ -90,10 +96,21 @@ jobs:
           LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
         run: uv run python -m rail_rag_monitor collect
 
+      # The noise report sets the quality threshold (delta), an owner decision. It only runs
+      # after a noise dispatch, never on a scheduled or planted run, so a regression cannot
+      # raise its own threshold and the stored delta is not rewritten every day.
       - name: Noise report
         id: noise
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.plant_regression }}
         continue-on-error: true
-        run: uv run python -m rail_rag_monitor noise-report
+        env:
+          NOISE_RUNS: ${{ inputs.noise_runs }}
+        run: |
+          if awk -v n="${NOISE_RUNS:-0}" 'BEGIN { exit !(n + 0 > 0) }'; then
+            uv run python -m rail_rag_monitor noise-report
+          else
+            echo "No noise runs requested: leaving the stored noise report alone."
+          fi
 
       - name: Alerts
         id: alert
@@ -152,9 +169,11 @@ jobs:
             build-site=${{ steps.site.outcome }}
         run: |
           failed=0
+          # Anything but success or skipped counts: a step timeout or cancellation too.
           for item in $OUTCOMES; do
             case "$item" in
-              *=failure) echo "::error::step ${item%%=*} failed"; failed=1 ;;
+              *=success | *=skipped) ;;
+              *) echo "::error::step ${item%%=*} did not succeed (${item#*=})"; failed=1 ;;
             esac
           done
           exit "$failed"
