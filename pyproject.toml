@@ -1,0 +1,35 @@
+[project]
+name = "rail-rag-monitor"
+version = "0.1.0"
+description = "Monitoring for a RAG demo: probe, Langfuse collector, alert rules and a status dashboard."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "João Pedro Cardoso" }]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28",
+    "goldpass @ git+https://github.com/cardohso/goldpass@v0.2.0",
+]
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rail_rag_monitor"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
