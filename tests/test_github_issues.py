@@ -1,0 +1,372 @@
+import json
+
+import httpx
+import pytest
+
+from rail_rag_monitor.alerts import Alert
+from rail_rag_monitor.github_issues import (
+    GitHubError,
+    GitHubIssues,
+    render_body,
+    sync,
+    trace_url,
+)
+
+REPO = "owner/rail-demo"
+TOKEN = "ghp_SECRETTOKEN123"
+RUN_URL = "https://github.com/owner/rail-demo/actions/runs/42"
+
+
+class FakeGitHub:
+    """Records requests; `open_issues` is the set of issue numbers GitHub reports as open."""
+
+    def __init__(self, open_issues=(), next_number=100):
+        self.requests: list[httpx.Request] = []
+        self.open_issues = set(open_issues)
+        self.next_number = next_number
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        path = request.url.path
+        if request.method == "POST" and path == f"/repos/{REPO}/issues":
+            number = self.next_number
+            self.next_number += 1
+            self.open_issues.add(number)
+            return httpx.Response(201, json={"number": number})
+        if request.method == "POST" and path.endswith("/comments"):
+            return httpx.Response(201, json={"id": 1})
+        if request.method == "PATCH":
+            return httpx.Response(200, json={"state": "closed"})
+        if request.method == "GET":
+            number = int(path.rsplit("/", 1)[1])
+            state = "open" if number in self.open_issues else "closed"
+            return httpx.Response(200, json={"number": number, "state": state})
+        return httpx.Response(500)
+
+    def gh(self) -> GitHubIssues:
+        return GitHubIssues(REPO, TOKEN, transport=httpx.MockTransport(self))
+
+    def calls(self) -> list[tuple[str, str]]:
+        return [(r.method, r.url.path) for r in self.requests]
+
+    def json_body(self, index: int) -> dict:
+        return json.loads(self.requests[index].content)
+
+
+def quality_alert(**extra) -> Alert:
+    details = {
+        "fail_recent": 9,
+        "n_recent": 24,
+        "fail_base": 3,
+        "n_base": 112,
+        "fail_rate_recent": 9 / 24,
+        "fail_rate_base": 3 / 112,
+        "p_value": 0.000123,
+        "alpha": 0.01,
+        "delta": 2 / 24,
+        "recent_run_ids": ["run-015", "run-016", "run-017"],
+        "baseline_run_ids": [f"run-{i:03d}" for i in range(1, 15)],
+        "failed": [
+            {"run_id": "run-016", "question_id": "q01", "trace_id": "tr-aaa"},
+            {"run_id": "run-017", "question_id": "q06", "trace_id": "tr-bbb"},
+        ],
+        **extra,
+    }
+    return Alert("quality", "Fail rate rose.", details)
+
+
+def uptime_alert() -> Alert:
+    return Alert(
+        "uptime",
+        "errors",
+        {
+            "run_ids": ["run-001", "run-002"],
+            "errors": [
+                {"run_id": "run-001", "question_id": "q01", "status": "timeout", "trace_id": "t1"},
+                {"run_id": "run-002", "question_id": "q02", "status": "http_500", "trace_id": None},
+            ],
+        },
+    )
+
+
+def latency_alert() -> Alert:
+    return Alert(
+        "latency",
+        "slow",
+        {
+            "recent_warm_p95_s": [9.5, 10.25],
+            "baseline_median_s": 3.0,
+            "threshold_s": 6.0,
+            "factor": 2.0,
+            "n_base": 14,
+            "recent_run_ids": ["run-016", "run-017"],
+            "baseline_run_ids": ["run-001", "run-002"],
+        },
+    )
+
+
+def run_sync(alerts, state, fake, *, dry_run=False, project_id="proj1"):
+    return sync(alerts, state, fake.gh(), run_url=RUN_URL, project_id=project_id, dry_run=dry_run)
+
+
+def test_opens_issue_when_none():
+    fake = FakeGitHub()
+    state = run_sync([quality_alert()], {"rules": {}}, fake)
+
+    assert fake.calls() == [("POST", f"/repos/{REPO}/issues")]
+    body = fake.json_body(0)
+    assert body["title"] == "[monitor] quality alert"
+    assert body["labels"] == ["monitor-alert", "rule:quality"]
+    assert state["rules"]["quality"] == {"issue": 100, "clean_runs": 0}
+
+
+def test_empty_state_is_accepted():
+    fake = FakeGitHub()
+    state = run_sync([latency_alert()], {}, fake)
+    assert state["rules"]["latency"] == {"issue": 100, "clean_runs": 0}
+
+
+def test_does_not_mutate_input_state():
+    fake = FakeGitHub()
+    original = {"rules": {"quality": {"issue": None, "clean_runs": 2}}}
+    run_sync([quality_alert()], original, fake)
+    assert original == {"rules": {"quality": {"issue": None, "clean_runs": 2}}}
+
+
+def test_comments_when_open():
+    fake = FakeGitHub(open_issues={7})
+    state = run_sync([quality_alert()], {"rules": {"quality": {"issue": 7, "clean_runs": 2}}}, fake)
+
+    assert fake.calls() == [
+        ("GET", f"/repos/{REPO}/issues/7"),
+        ("POST", f"/repos/{REPO}/issues/7/comments"),
+    ]
+    assert state["rules"]["quality"] == {"issue": 7, "clean_runs": 0}
+
+
+def test_reopens_new_when_closed_by_hand():
+    fake = FakeGitHub(open_issues=set())  # owner closed #7
+    state = run_sync([quality_alert()], {"rules": {"quality": {"issue": 7, "clean_runs": 1}}}, fake)
+
+    assert fake.calls() == [
+        ("GET", f"/repos/{REPO}/issues/7"),
+        ("POST", f"/repos/{REPO}/issues"),
+    ]
+    assert state["rules"]["quality"] == {"issue": 100, "clean_runs": 0}
+
+
+def test_closes_after_3_clean_runs():
+    fake = FakeGitHub(open_issues={7})
+    state = {"rules": {"quality": {"issue": 7, "clean_runs": 0}}}
+
+    state = run_sync([], state, fake)
+    state = run_sync([], state, fake)
+    assert fake.requests == []
+    assert state["rules"]["quality"] == {"issue": 7, "clean_runs": 2}
+
+    state = run_sync([], state, fake)
+    assert fake.calls() == [
+        ("GET", f"/repos/{REPO}/issues/7"),
+        ("POST", f"/repos/{REPO}/issues/7/comments"),
+        ("PATCH", f"/repos/{REPO}/issues/7"),
+    ]
+    assert "recovered" in fake.json_body(1)["body"]
+    assert fake.json_body(2) == {"state": "closed"}
+    assert state["rules"]["quality"] == {"issue": None, "clean_runs": 0}
+
+
+def test_firing_resets_clean_run_count():
+    fake = FakeGitHub(open_issues={7})
+    state = {"rules": {"quality": {"issue": 7, "clean_runs": 2}}}
+    state = run_sync([quality_alert()], state, fake)
+    state = run_sync([], state, fake)
+    assert state["rules"]["quality"] == {"issue": 7, "clean_runs": 1}
+    assert not any(method == "PATCH" for method, _ in fake.calls())
+
+
+def test_clean_run_without_issue_stays_zero():
+    fake = FakeGitHub()
+    state = run_sync([], {"rules": {"quality": {"issue": None, "clean_runs": 0}}}, fake)
+    assert fake.requests == []
+    assert state["rules"]["quality"] == {"issue": None, "clean_runs": 0}
+
+
+def test_recovery_skips_comment_when_closed_by_hand():
+    fake = FakeGitHub(open_issues=set())
+    state = {"rules": {"quality": {"issue": 7, "clean_runs": 2}}}
+    state = run_sync([], state, fake)
+    assert fake.calls() == [("GET", f"/repos/{REPO}/issues/7")]
+    assert state["rules"]["quality"] == {"issue": None, "clean_runs": 0}
+
+
+def test_rules_are_independent():
+    fake = FakeGitHub(open_issues={7})
+    state = {
+        "rules": {
+            "quality": {"issue": 7, "clean_runs": 0},
+            "latency": {"issue": None, "clean_runs": 0},
+        }
+    }
+    state = run_sync([latency_alert()], state, fake)
+    assert state["rules"]["latency"] == {"issue": 100, "clean_runs": 0}
+    assert state["rules"]["quality"] == {"issue": 7, "clean_runs": 1}
+
+
+def test_body_has_trace_links():
+    body = render_body(quality_alert(), RUN_URL, "proj1")
+    assert "https://cloud.langfuse.com/project/proj1/traces/tr-aaa" in body
+    assert "https://cloud.langfuse.com/project/proj1/traces/tr-bbb" in body
+    assert RUN_URL in body
+    assert "q01" in body and "q06" in body
+    assert "run-016" in body
+    assert "9/24" in body
+    assert "37.5%" in body
+    assert trace_url("proj1", "tr-aaa") == "https://cloud.langfuse.com/project/proj1/traces/tr-aaa"
+
+
+def test_body_without_project_id():
+    body = render_body(quality_alert(), RUN_URL, None)
+    assert "cloud.langfuse.com" not in body
+    assert "tr-aaa" in body and "tr-bbb" in body
+
+
+def test_uptime_and_latency_bodies():
+    up = render_body(uptime_alert(), RUN_URL, "proj1")
+    assert "timeout" in up and "http_500" in up and "q02" in up
+    assert "traces/t1" in up
+    lat = render_body(latency_alert(), RUN_URL, "proj1")
+    assert "10.25" in lat and "3.00" in lat and "6.00" in lat
+
+
+def test_body_never_contains_free_text_from_details():
+    alert = quality_alert(
+        answer="SECRET-TEXT",
+        question="SECRET-QUESTION",
+        citations=["SECRET-CITATION"],
+    )
+    alert.details["failed"][0]["answer"] = "SECRET-TEXT"
+    alert.details["failed"][1]["question"] = "SECRET-QUESTION"
+    alert.details["failed"][1]["question_id"] = "SECRET-TEXT with spaces"
+    alert.details["failed"][1]["trace_id"] = "SECRET-TEXT [x](http://evil)"
+    alert.summary = "SECRET-TEXT"
+    body = render_body(alert, RUN_URL, "proj1")
+    assert "SECRET" not in body
+    assert "evil" not in body
+
+    up = uptime_alert()
+    up.details["errors"][0]["status"] = "SECRET-TEXT leaked"
+    up.details["errors"][0]["body"] = "SECRET-TEXT"
+    assert "SECRET" not in render_body(up, RUN_URL, "proj1")
+
+
+def test_body_ignores_unsafe_run_url_and_project_id():
+    body = render_body(quality_alert(), "javascript:alert(1) [x]", "p/../x")
+    assert "javascript" not in body
+    assert "cloud.langfuse.com" not in body
+
+
+def test_dry_run_labels_and_state_isolated():
+    fake = FakeGitHub(open_issues={7})
+    state = {
+        "rules": {"quality": {"issue": 7, "clean_runs": 2}},
+    }
+    new = run_sync([quality_alert()], state, fake, dry_run=True)
+
+    assert fake.calls() == [("POST", f"/repos/{REPO}/issues")]
+    body = fake.json_body(0)
+    assert body["title"] == "[dry-run] [monitor] quality alert"
+    assert body["labels"] == ["monitor-alert", "rule:quality", "dry-run"]
+    assert new["rules"] == {"quality": {"issue": 7, "clean_runs": 2}}
+    assert new["dry_run_issues"] == {"quality": 100}
+    assert state == {"rules": {"quality": {"issue": 7, "clean_runs": 2}}}
+
+
+def test_dry_run_comments_on_its_own_open_issue():
+    fake = FakeGitHub(open_issues={50})
+    state = {"rules": {}, "dry_run_issues": {"quality": 50}}
+    new = run_sync([quality_alert()], state, fake, dry_run=True)
+    assert fake.calls() == [
+        ("GET", f"/repos/{REPO}/issues/50"),
+        ("POST", f"/repos/{REPO}/issues/50/comments"),
+    ]
+    assert new["dry_run_issues"] == {"quality": 50}
+
+
+def test_dry_run_with_no_alerts_changes_nothing():
+    fake = FakeGitHub(open_issues={7})
+    state = {"rules": {"quality": {"issue": 7, "clean_runs": 2}}}
+    new = run_sync([], state, fake, dry_run=True)
+    assert fake.requests == []
+    assert new["rules"] == state["rules"]
+
+
+def test_real_run_never_touches_dry_run_issues():
+    fake = FakeGitHub()
+    state = {"rules": {}, "dry_run_issues": {"quality": 50}}
+    new = run_sync([quality_alert()], state, fake)
+    assert new["dry_run_issues"] == {"quality": 50}
+    assert new["rules"]["quality"]["issue"] == 100
+
+
+def test_token_only_in_authorization_header():
+    fake = FakeGitHub()
+    run_sync([quality_alert()], {"rules": {}}, fake)
+    request = fake.requests[0]
+    assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+    assert TOKEN not in str(request.url)
+    assert TOKEN not in request.content.decode()
+    assert TOKEN not in repr(fake.gh())
+
+
+def test_http_error_does_not_leak_token():
+    def handler(request):
+        return httpx.Response(403, json={"message": f"echo {TOKEN}"})
+
+    gh = GitHubIssues(REPO, TOKEN, transport=httpx.MockTransport(handler))
+    with pytest.raises(GitHubError) as info:
+        gh.create("t", "b", ["monitor-alert"])
+    assert TOKEN not in str(info.value)
+    assert TOKEN not in repr(info.value)
+    assert "403" in str(info.value)
+
+
+def test_transport_error_does_not_leak_token():
+    def handler(request):
+        raise httpx.ConnectError(f"boom {request.headers['Authorization']}")
+
+    gh = GitHubIssues(REPO, TOKEN, transport=httpx.MockTransport(handler))
+    with pytest.raises(GitHubError) as info:
+        gh.comment(1, "b")
+    assert TOKEN not in str(info.value)
+    assert TOKEN not in repr(info.value)
+    assert info.value.__cause__ is None
+
+
+def test_is_open_handles_missing_issue_and_errors():
+    def handler(request):
+        return httpx.Response(404 if request.url.path.endswith("/9") else 500)
+
+    gh = GitHubIssues(REPO, TOKEN, transport=httpx.MockTransport(handler))
+    assert gh.is_open(9) is False
+    with pytest.raises(GitHubError):
+        gh.is_open(10)
+
+
+@pytest.mark.parametrize(
+    "repo",
+    ["", "owner", "owner/", "/name", "a/b/c", "a b/c", "a/b c", "../x", "a/..", "a/b?x=1", "a/b\n"],
+)
+def test_rejects_bad_repo(repo):
+    with pytest.raises(ValueError, match="owner/name"):
+        GitHubIssues(repo, TOKEN, transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+
+
+def test_accepts_dotted_repo():
+    GitHubIssues("my-org/rail_rag.monitor", TOKEN, transport=httpx.MockTransport(FakeGitHub()))
+
+
+@pytest.mark.parametrize("token", ["", "a\nb", "a b"])
+def test_rejects_bad_token_without_echoing_it(token):
+    with pytest.raises(ValueError) as info:
+        GitHubIssues(REPO, token, transport=httpx.MockTransport(FakeGitHub()))
+    assert token not in str(info.value) or token == ""
