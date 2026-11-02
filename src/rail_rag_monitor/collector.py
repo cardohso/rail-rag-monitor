@@ -8,6 +8,7 @@ holds counts, rates and latencies only.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
@@ -18,6 +19,11 @@ from rail_rag_monitor.stats import percentile
 ENVIRONMENT = "azure-container-apps"
 ROOT_NAME = "rag-ask"
 GROUNDING_REASONS = frozenset({"insufficient_context", "no_citations"})
+# The only refusal reasons stored by name; any other value is counted as "other" so free text
+# from a trace can never become a stored key.
+KNOWN_REASONS = frozenset(
+    {"low_retrieval_score", "no_relevant_passages", "insufficient_context", "no_citations"}
+)
 
 
 @dataclass
@@ -51,6 +57,26 @@ def _is_error(root: dict) -> bool:
     return root.get("level") == "ERROR"
 
 
+def _reason(out: dict) -> str:
+    """Closed-set refusal reason: a known name, "other", or "unknown" when none was given."""
+    reason = out.get("refusal_reason")
+    if not reason:
+        return "unknown"
+    return reason if isinstance(reason, str) and reason in KNOWN_REASONS else "other"
+
+
+def _latency(root: dict) -> float | None:
+    """The root's latency in seconds, or None when absent or not a finite number."""
+    value = root.get("latency")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if math.isfinite(seconds) else None
+
+
 def _tokens_per_request(generations: list[dict], n_requests: int) -> float | None:
     """None (not 0) until the app reports usage on at least one generation."""
     if n_requests == 0 or not any(g.get("usageDetails") for g in generations):
@@ -73,7 +99,8 @@ def summarize_day(
     exclude_trace_ids: set[str],
 ) -> TrafficDay:
     kept = [r for r in roots if r.get("traceId") not in exclude_trace_ids]
-    kept_generations = [g for g in generations if g.get("traceId") not in exclude_trace_ids]
+    kept_traces = {r["traceId"] for r in kept if r.get("traceId") is not None}
+    kept_generations = [g for g in generations if g.get("traceId") in kept_traces]
     n_requests = len(kept)
     n_errors = sum(1 for r in kept if _is_error(r))
 
@@ -84,13 +111,13 @@ def summarize_day(
     for out in outputs:
         if out.get("refused"):
             n_refused += 1
-            reason = out.get("refusal_reason") or "unknown"
+            reason = _reason(out)
             reasons[reason] = reasons.get(reason, 0) + 1
     refusal_rate = n_refused / len(outputs) if outputs else None
     grounding = sum(count for reason, count in reasons.items() if reason in GROUNDING_REASONS)
     grounding_share = grounding / n_refused if n_refused else None
 
-    latencies = [float(r["latency"]) for r in answered_ok if r.get("latency") is not None]
+    latencies = [v for v in map(_latency, answered_ok) if v is not None]
 
     return TrafficDay(
         day=day.isoformat(),

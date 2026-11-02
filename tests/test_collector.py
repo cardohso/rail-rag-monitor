@@ -3,6 +3,7 @@ from datetime import date
 from pathlib import Path
 
 import httpx
+import pytest
 
 from rail_rag_monitor.collector import TrafficDay, collect_day, summarize_day
 from rail_rag_monitor.langfuse_api import LangfuseAPI
@@ -178,3 +179,104 @@ def test_recollect_replaces_day(tmp_path):
     rows = read_jsonl(path)
     assert len(rows) == 1
     assert rows[0]["n_requests"] == 5
+
+
+def refused_root(i, reason, **extra):
+    return {
+        "id": f"x{i}",
+        "traceId": f"tx{i}",
+        "level": "DEFAULT",
+        "latency": 1.0,
+        "output": {"refused": True, "refusal_reason": reason, "answer": "FAKE-ANSWER"},
+        **extra,
+    }
+
+
+def test_refusal_reason_is_limited_to_known_values():
+    hostile = "SECRET-FREE-TEXT"
+    data = [
+        refused_root(1, "low_retrieval_score"),
+        refused_root(2, "no_relevant_passages"),
+        refused_root(3, "insufficient_context"),
+        refused_root(4, "no_citations"),
+        refused_root(5, hostile),
+        refused_root(6, [hostile]),
+        refused_root(7, {"k": hostile}),
+        refused_root(8, 42),
+        refused_root(9, None),
+        refused_root(10, ""),
+    ]
+    s = summarize_day(DAY, data, [], set())
+    assert s.refusals_by_reason == {
+        "low_retrieval_score": 1,
+        "no_relevant_passages": 1,
+        "insufficient_context": 1,
+        "no_citations": 1,
+        "other": 4,
+        "unknown": 2,
+    }
+    assert "SECRET" not in json.dumps(s.to_dict())
+    # unknown reasons are not grounding failures: only the two grounding reasons count
+    assert s.grounding_failure_share == 2 / 10
+
+
+def test_generations_only_count_for_kept_rag_ask_roots():
+    generation = [
+        {"traceId": "t1", "usageDetails": {"i": 1}, "totalUsage": 10, "totalCost": 1.0},
+        {"traceId": "t2", "usageDetails": {"i": 1}, "totalUsage": 20, "totalCost": 2.0},
+        # a trace that has no rag-ask root in the day (another app, or a root outside the day)
+        {"traceId": "other-trace", "usageDetails": {"i": 1}, "totalUsage": 900, "totalCost": 90.0},
+        {"usageDetails": {"i": 1}, "totalUsage": 900, "totalCost": 90.0},
+    ]
+    s = summarize_day(DAY, roots(), generation, {"t1"})
+    assert s.n_requests == 5
+    assert s.tokens_per_request == 20 / 5
+    assert s.cost_per_request == 2.0 / 5
+
+
+def test_all_error_day_has_no_rates_or_latency():
+    data = [r for r in roots() if r["level"] == "ERROR"]
+    data.append({**data[0], "id": "r9", "traceId": "t9"})
+    s = summarize_day(DAY, data, [], set())
+    assert (s.n_requests, s.n_errors) == (2, 2)
+    assert s.refusal_rate is None
+    assert s.grounding_failure_share is None
+    assert s.refusals_by_reason == {}
+    assert s.p50_s is None and s.p95_s is None
+
+
+def test_root_without_latency_is_left_out_of_percentiles():
+    data = roots()
+    data.append({**data[0], "id": "r7", "traceId": "t7", "latency": None})
+    data.append({k: v for k, v in data[0].items() if k != "latency"} | {"traceId": "t8"})
+    s = summarize_day(DAY, data, [], set())
+    assert s.n_requests == 8
+    assert s.p50_s == 3.0
+    assert s.p95_s == 4.8
+
+
+@pytest.mark.parametrize("bad", ["slow", [1], {"a": 1}, True, float("nan"), float("inf")])
+def test_non_numeric_latency_is_skipped_not_a_crash(bad):
+    data = roots()
+    data.append({**data[0], "id": "r7", "traceId": "t7", "latency": bad})
+    s = summarize_day(DAY, data, [], set())
+    assert s.n_requests == 7
+    assert s.p50_s == 3.0
+    assert s.p95_s == 4.8
+
+
+def test_numeric_string_latency_is_still_read():
+    data = [{**roots()[0], "latency": "2.5"}]
+    assert summarize_day(DAY, data, [], set()).p50_s == 2.5
+
+
+def test_insufficient_context_counts_as_a_grounding_failure():
+    data = [
+        refused_root(1, "insufficient_context"),
+        refused_root(2, "low_retrieval_score"),
+        refused_root(3, "no_relevant_passages"),
+        refused_root(4, "insufficient_context"),
+    ]
+    s = summarize_day(DAY, data, [], set())
+    assert s.refusals_by_reason["insufficient_context"] == 2
+    assert s.grounding_failure_share == 2 / 4
