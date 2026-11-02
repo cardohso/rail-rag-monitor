@@ -7,7 +7,12 @@ from collections.abc import Sequence
 
 
 def percentile(values: Sequence[float], q: float) -> float | None:
-    """Return the q-quantile (0..1) using linear interpolation, or None if empty."""
+    """Return the q-quantile (0..1) using linear interpolation, or None if empty.
+
+    Raises ValueError if q is outside [0, 1] (or not a number).
+    """
+    if not 0 <= q <= 1:
+        raise ValueError(f"q must be between 0 and 1, got {q}")
     if not values:
         return None
     ordered = sorted(values)
@@ -24,7 +29,14 @@ def fisher_one_sided(fail_recent: int, n_recent: int, fail_base: int, n_base: in
 
     The null pools both groups: with F = fail_recent + fail_base failures among
     N = n_recent + n_base trials, the recent group is a random draw of n_recent.
+
+    Raises ValueError for a negative count or a failure count above its group size.
     """
+    if not (0 <= fail_recent <= n_recent and 0 <= fail_base <= n_base):
+        raise ValueError(
+            "failure counts must satisfy 0 <= failures <= group size, got "
+            f"{fail_recent}/{n_recent} recent and {fail_base}/{n_base} baseline"
+        )
     total_fail = fail_recent + fail_base
     total = n_recent + n_base
     denom = math.comb(total, n_recent)
