@@ -69,7 +69,7 @@ jobs:
           ref: data
           path: data
 
-      # The next four steps never stop the run: the data, the site and an uptime alert are what
+      # The next five steps never stop the run: the data, the site and an uptime alert are what
       # we want when the demo is down. "Fail the job at the end" turns any failure red.
       - name: Probe
         id: probe
@@ -80,7 +80,8 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           NOISE_RUNS: ${{ inputs.noise_runs }}
         run: |
-          if [ "${NOISE_RUNS:-0}" != "0" ]; then
+          # The same numeric test as the Noise report step, so the two always agree.
+          if awk -v n="${NOISE_RUNS:-0}" 'BEGIN { exit !(n + 0 > 0) }'; then
             uv run python -m rail_rag_monitor probe --kind noise --repeat "$NOISE_RUNS"
           elif [ "$EVENT_NAME" = "schedule" ]; then
             uv run python -m rail_rag_monitor probe --kind scheduled
@@ -98,10 +99,12 @@ jobs:
 
       # The noise report sets the quality threshold (delta), an owner decision. It only runs
       # after a noise dispatch, never on a scheduled or planted run, so a regression cannot
-      # raise its own threshold and the stored delta is not rewritten every day.
+      # raise its own threshold and the stored delta is not rewritten every day. It also needs
+      # the probe to have succeeded: a killed or failed noise dispatch must not set delta from
+      # partial data (the final gate still turns the failed probe red).
       - name: Noise report
         id: noise
-        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.plant_regression }}
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.plant_regression && steps.probe.outcome == 'success' }}
         continue-on-error: true
         env:
           NOISE_RUNS: ${{ inputs.noise_runs }}
@@ -144,7 +147,13 @@ jobs:
             echo "No data changes to commit."
           else
             git commit -m "data: monitor run ${GITHUB_RUN_ID}"
-            git push origin HEAD:data
+            # If the push is rejected (data moved on), rebase once and retry. A second failure,
+            # or a rebase conflict, fails the step.
+            if ! git push origin HEAD:data; then
+              echo "Push rejected: rebasing onto origin/data and retrying once."
+              git pull --rebase origin data
+              git push origin HEAD:data
+            fi
           fi
 
       - name: Upload the site
