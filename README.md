@@ -15,7 +15,16 @@ It watches [rail-regulation-rag](https://github.com/cardohso/rail-regulation-rag
 3. **An alert** opens (or updates) a GitHub issue when the last 3 probe runs fail clearly more often than the 14 runs before them. A one-sided Fisher exact test (p < 0.01) decides.
 4. **A static dashboard** on GitHub Pages shows aggregates only: no question, answer or citation text from real traffic is ever stored or published.
 
-Everything runs in one GitHub Actions workflow (cron 06:17 UTC plus manual dispatch). Metrics are JSONL files on a `data` branch. Free tiers only.
+Everything runs in one GitHub Actions workflow (cron targeting 06:17 UTC, which GitHub may start hours late, plus manual dispatch). Metrics are JSONL files on a `data` branch. Free tiers only.
+
+## Status
+
+**v1, closed with two checks outstanding.** Built and tested offline (CI green), live dashboard, runs daily on GitHub. Not done:
+
+- **Planted-regression dry run on GitHub.** It needs 7 stored probe runs and the store held 4 when I stopped. The same scenario passes in the offline tests; it has not been exercised against the live workflow. To do it: run the workflow with `plant_regression = true` once 7 runs are stored.
+- **Three scheduled days in a row.** One scheduled run was observed (3 Nov 2026, started about 8 hours after the cron time). The schedule is left running.
+
+First scheduled run: 8 of 8 questions passed, but warm latency was about 61 s (p50) against about 3 s in the three manual runs the evening before. One run, so I do not know whether it is a trend; the latency rule needs 7 baseline runs before it can alert.
 
 **Live dashboard:** https://cardohso.github.io/rail-rag-monitor/
 
@@ -27,7 +36,7 @@ Everything runs in one GitHub Actions workflow (cron 06:17 UTC plus manual dispa
 
 ```mermaid
 flowchart LR
-  cron["GitHub Actions<br/>daily 06:17 UTC + manual"] --> probe
+  cron["GitHub Actions<br/>daily ~06:17 UTC + manual"] --> probe
   probe["probe<br/>8 golden questions"] -->|"POST /ask, 13 s apart"| demo[("live demo")]
   demo -->|traces| lf[("Langfuse Cloud")]
   probe -->|"scores, status, latency, trace ids"| store
@@ -81,7 +90,7 @@ The repo proves the alert fires on a real regression and stays quiet on noise, i
 - `tests/test_alerts.py::test_dry_run_after_errored_or_slow_real_run_yields_only_quality`: a dry run can only trip the quality rule, never uptime or latency, whatever the last real run looked like.
 - **On GitHub:** run the workflow with `plant_regression = true`. It skips the live probe, appends three planted bad runs *in memory* (never stored) and opens an issue titled `[dry-run] [monitor] quality alert` with the `dry-run` label. It needs at least 7 stored runs.
 
-<!-- DRY-RUN-RESULT: add link to the real dry-run issue and screenshot after the dry run has been done on GitHub -->
+The real dry run on GitHub has **not been done yet** (see Status).
 
 ## Limitations
 
@@ -92,7 +101,8 @@ The repo proves the alert fires on a real regression and stays quiet on noise, i
 - **Probe errors can show up as "real" errors.** When the demo is down, its error replies carry no trace id, so failed probe calls cannot be excluded from the real-traffic error counts.
 - **Free-tier limits.** Langfuse Hobby keeps 30 days of data and limits the observations API to 30 requests a minute, so history older than 30 days exists only in this repo's own store (from the first collection onwards). The demo scales to zero (the first request of a run can be slow) and has a daily question budget that the probe shares (normally 8 of 300; at most 33 in a pathological run).
 - **Langfuse region.** `LANGFUSE_HOST` defaults to the EU cloud. Set the repository variable `LANGFUSE_HOST` for another region.
-- **Not verified yet** (will be filled in as the daily runs accumulate): whether Langfuse's `latency` is in seconds on real traffic, whether a timed-out workflow step reports `failure` or `cancelled` (the final gate fails the job on anything other than success or skipped, so both are covered), and whether the workflow's own commits keep the 60-day schedule alive.
+- **Real-traffic collection is untested against live data.** Both collected days (1 and 2 Nov) returned 0 requests, including 2 Nov when the probe made 24 calls, so I cannot tell whether probe traces are correctly excluded or the collector simply sees nothing.
+- **Not verified yet**: whether Langfuse's `latency` is in seconds on real traffic, whether a timed-out workflow step reports `failure` or `cancelled` (the final gate fails the job on anything other than success or skipped, so both are covered), and whether the workflow's own commits keep the 60-day schedule alive.
 
 ## Privacy
 
