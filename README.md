@@ -19,12 +19,11 @@ Everything runs in one GitHub Actions workflow (cron targeting 06:17 UTC, which 
 
 ## Status
 
-**v1, closed with two checks outstanding.** Built and tested offline (CI green), live dashboard, runs daily on GitHub. Not done:
+**v1, closed.** Built and tested offline (CI green), live dashboard, runs daily on GitHub, and the alert has fired on a planted regression on GitHub (below).
 
-- **Planted-regression dry run on GitHub.** It needs 7 stored probe runs and the store held 4 when I stopped. The same scenario passes in the offline tests; it has not been exercised against the live workflow. To do it: run the workflow with `plant_regression = true` once 7 runs are stored.
-- **Three scheduled days in a row.** One scheduled run was observed (3 Nov 2026, started about 8 hours after the cron time). The schedule is left running.
-
-First scheduled run: 8 of 8 questions passed, but warm latency was about 61 s (p50) against about 3 s in the three manual runs the evening before. One run, so I do not know whether it is a trend; the latency rule needs 7 baseline runs before it can alert.
+- **Scheduled runs:** 3, 4, 5 and 6 Nov 2026 all started on `schedule` and succeeded. GitHub starts them around 14:30 UTC, about 8 hours after the 06:17 cron time.
+- **Demo latency:** warm p50 was about 3 s on 2 Nov, then 61 s, 32 s, 7 s and 2.4 s on 3 to 6 Nov. It recovered on its own; I did not find the cause. The latency rule needs 7 baseline runs before it can alert, so it could not have fired on this.
+- **Not exercised yet:** real-traffic collection (see Limitations).
 
 **Live dashboard:** https://cardohso.github.io/rail-rag-monitor/
 
@@ -90,7 +89,7 @@ The repo proves the alert fires on a real regression and stays quiet on noise, i
 - `tests/test_alerts.py::test_dry_run_after_errored_or_slow_real_run_yields_only_quality`: a dry run can only trip the quality rule, never uptime or latency, whatever the last real run looked like.
 - **On GitHub:** run the workflow with `plant_regression = true`. It skips the live probe, appends three planted bad runs *in memory* (never stored) and opens an issue titled `[dry-run] [monitor] quality alert` with the `dry-run` label. It needs at least 7 stored runs.
 
-The real dry run on GitHub has **not been done yet** (see Status).
+**Done on 7 Nov 2026:** [issue #1](https://github.com/cardohso/rail-rag-monitor/issues/1) `[dry-run] [monitor] quality alert` (labels `monitor-alert`, `rule:quality`, `dry-run`), opened by [workflow run 42320976208](https://github.com/cardohso/rail-rag-monitor/actions/runs/42320976208): 12 of 24 recent questions failed against 0 of 56 in the baseline, Fisher p = 4.5e-08. The live probe was skipped, so nothing was sent to the demo, and `probe_runs.jsonl` on the `data` branch was byte-identical before and after. Known wart: the planted runs reuse the last real run's trace ids, so the trace links in that issue point at real, passing probe traces.
 
 ## Limitations
 
