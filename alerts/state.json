@@ -12,5 +12,8 @@
       "issue": null,
       "clean_runs": 0
     }
+  },
+  "dry_run_issues": {
+    "quality": 1
   }
 }
